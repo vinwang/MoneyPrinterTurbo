@@ -80,6 +80,17 @@ def test_find_final_task_video_returns_first_numbered_output(tmp_path):
     assert find_final_task_video(str(tmp_path)) == str(tmp_path / "final-1.mp4")
 
 
+def test_find_final_task_video_prefers_advertising_post_processed_output(tmp_path):
+    """历史任务优先预览广告后处理成片，而不是原始 MPT 成片。"""
+    raw = tmp_path / "final-1.mp4"
+    raw.touch()
+    processed = tmp_path / "advertising" / "final" / "job" / "1" / "render" / "1.mp4"
+    processed.parent.mkdir(parents=True)
+    processed.touch()
+
+    assert find_final_task_video(str(tmp_path)) == str(processed)
+
+
 def test_build_video_download_name_uses_subject_and_output_index():
     assert (
         build_video_download_name("A day: in / Shanghai?", 2, 3)

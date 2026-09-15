@@ -119,6 +119,9 @@ class VideoParams(BaseModel):
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
     )
+    # 本地素材语义匹配冻结后的执行计划；非 local 来源保持 None，不进入旧流程。
+    local_storyboard_plan: Optional[List[dict[str, Any]]] = None
+    local_bgm_asset_id: Optional[str] = None
 
     custom_audio_file: Optional[str] = (
         None  # Custom audio file path, will ignore TTS and can still use Whisper subtitles

@@ -402,6 +402,7 @@
     "OFox Upstream Vendor Help": "Какой вышестоящий поставщик обслуживает генерацию видео OFox. BytePlus (международный) — значение по умолчанию с единой контентной политикой; Volcano Engine — поставщик материкового Китая; Авто — шлюз OFox сам распределяет нагрузку между поставщиками.",
     "OFox Vendor BytePlus": "BytePlus (международный, по умолчанию)",
     "OFox Vendor Volcengine": "Volcano Engine (материковый Китай)",
-    "OFox Vendor Auto": "Авто (балансировка шлюзом)"
+    "OFox Vendor Auto": "Авто (балансировка шлюзом)",
+    "Planning Storyboard Shots": "Планирование кадров раскадровки..."
   }
 }

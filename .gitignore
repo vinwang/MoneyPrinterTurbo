@@ -42,3 +42,6 @@ htmlcov/
 .codegraph
 /docs/superpowers
 .understand-anything
+
+# 本地素材库（config.toml 的 local_video_library_directory 指向此处）
+/resource/videos/

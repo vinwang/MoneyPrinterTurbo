@@ -77,6 +77,13 @@ tls_verify = true
 # or cloud relays) and renders it into a video clip.
 video_source = "pexels"
 
+# Optional local library roots used when video_source is "local". The WebUI
+# scans subdirectories recursively; each relative subdirectory becomes the
+# initial asset category. Leave empty to keep the existing upload-only flow.
+# 本地视频来源的素材库根目录。WebUI 会递归扫描子目录，并使用相对目录作为初始分类。
+local_video_library_directory = ""
+local_bgm_library_directory = ""
+
 # API key lists support key rotation. Use straight ASCII double quotes and
 # separate multiple keys with commas, for example: ["key-1", "key-2"].
 # Key 必须使用英文半角双引号，多个 Key 使用英文逗号分隔。

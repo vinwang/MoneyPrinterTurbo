@@ -302,6 +302,55 @@ def test_submit_generation_copies_params_before_starting_worker():
     webui_task.sm.state.delete_task("copied-params-test")
 
 
+def test_submit_generation_copies_post_process_paths_into_worker_queue():
+    """The WebUI worker must receive frozen post-processing paths with the task."""
+    params = VideoParams(video_subject="post-process-paths")
+    with patch.object(webui_task._task_manager, "add_task") as add_task:
+        webui_task.submit_generation(
+            "post-process-paths-test",
+            params,
+            capture_logs=False,
+            post_process_spec_path="/tmp/spec.json",
+            post_process_output_root="/tmp/output",
+        )
+
+    kwargs = add_task.call_args.kwargs
+    assert kwargs["post_process_spec_path"] == "/tmp/spec.json"
+    assert kwargs["post_process_output_root"] == "/tmp/output"
+    webui_task.sm.state.delete_task("post-process-paths-test")
+
+
+def test_webui_worker_post_processes_before_task_start_returns():
+    """The worker supplies a callback so MPT publishes processed paths downstream."""
+    captured = {}
+
+    def fake_start(**kwargs):
+        captured["callback"] = kwargs["post_process_callback"]
+        return {
+            "videos": list(captured["callback"]("worker-post-process", ("raw.mp4",)))
+        }
+
+    with (
+        patch.object(webui_task.tm, "start", side_effect=fake_start),
+        patch.object(
+            webui_task, "process_webui_videos", return_value=("final.mp4",)
+        ) as process,
+        patch.object(
+            webui_task.config, "runtime_config_lock", return_value=nullcontext()
+        ),
+    ):
+        result = webui_task._run_generation(
+            "worker-post-process",
+            VideoParams(video_subject="callback"),
+            capture_logs=False,
+            post_process_spec_path="/tmp/spec.json",
+            post_process_output_root="/tmp/output",
+        )
+
+    assert result["videos"] == ["final.mp4"]
+    process.assert_called_once()
+
+
 def test_scheduling_failure_is_saved_as_terminal_task_state():
     """队列或线程启动失败时不能让任务管理器永久停留在“生成中”。"""
     task_id = "scheduling-failure-test"

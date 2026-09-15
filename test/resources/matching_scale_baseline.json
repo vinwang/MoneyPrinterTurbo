@@ -1,0 +1,18 @@
+{
+  "summary": {
+    "asset_count": 10000,
+    "segment_count": 30000,
+    "peak_rss_mb": 180.546875,
+    "cold_scan_seconds": 2920.235263136972,
+    "rescan_seconds": 1.6106168080004863,
+    "assets_indexed_per_second": 3.4243816332995753,
+    "rescan_assets_per_second": 6208.801466821014,
+    "vision_calls": 10000,
+    "vision_calls_per_asset": 1.0,
+    "rescan_vision_calls": 0,
+    "query_count": 3,
+    "max_query_seconds": 3.650222580996342,
+    "mean_query_seconds": 2.967654854680101,
+    "vision_model": "deterministic-stand-in"
+  }
+}

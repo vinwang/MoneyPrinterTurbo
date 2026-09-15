@@ -53,3 +53,48 @@ To add tests for other components, follow these guidelines:
 ## Test Resources
 
 Place any resource files required for testing in the `test/resources` directory.
+
+## Local Matching Eval Set and Scale Baseline
+
+Two scripts measure local storyboard matching. They are not part of the pytest
+suite, because both need a populated asset index; their own logic is unit-tested
+in `test/scripts/test_matching_eval.py` and `test/scripts/test_matching_scale.py`.
+
+`scripts/matching_eval.py` scores matching against human labels in
+`test/resources/matching_eval_set.json`. Metrics come from the labels, never from
+the matcher's own scores.
+
+```bash
+# Score the current matcher against the labelled eval set
+uv run python -m scripts.matching_eval --eval-set test/resources/matching_eval_set.json
+
+# Compare against the recorded baseline; exits 1 when a tracked metric regresses
+uv run python -m scripts.matching_eval \
+  --eval-set test/resources/matching_eval_set.json \
+  --baseline test/resources/matching_eval_baseline.json
+```
+
+Labelled `asset_id` values contain a content hash, so re-encoding an asset
+changes its ID. The runner then fails with `missing from the index` instead of
+silently reporting a zero hit rate — re-label the affected cases.
+
+Both scripts are run against the human-labelled set and the synthetic corpus
+respectively; neither calls a real vision model, so neither can show a quality
+improvement on its own. See `docs/MPT广告素材生产系统-改动方案.md` §11.7 for the
+acceptance rules these numbers feed.
+
+`scripts/matching_scale.py` measures index and query cost on a synthetic library.
+The vision model is replaced by a deterministic stand-in, so `vision_calls` is the
+call volume a real run would spend, and the timings exclude real model latency and
+cost.
+
+```bash
+uv run python -m scripts.matching_scale \
+  --library-root /tmp/mpt_scale/videos \
+  --db-path /tmp/mpt_scale/index.sqlite3 \
+  --asset-count 10000
+```
+
+Recorded baselines live in `test/resources/matching_eval_baseline.json` and
+`test/resources/matching_scale_baseline.json`. Re-record them only together with
+the change that moved the numbers, and state which machine produced them.

@@ -402,6 +402,7 @@
     "OFox Upstream Vendor Help": "Fournisseur amont utilisé pour la génération vidéo OFox. BytePlus (international) est la valeur par défaut, avec une politique de contenu cohérente ; Volcano Engine est le fournisseur de Chine continentale ; Auto laisse la passerelle OFox répartir la charge entre les fournisseurs.",
     "OFox Vendor BytePlus": "BytePlus (international, défaut)",
     "OFox Vendor Volcengine": "Volcano Engine (Chine continentale)",
-    "OFox Vendor Auto": "Auto (répartition par la passerelle)"
+    "OFox Vendor Auto": "Auto (répartition par la passerelle)",
+    "Planning Storyboard Shots": "Planification des plans du storyboard..."
   }
 }

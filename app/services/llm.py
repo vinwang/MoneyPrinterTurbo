@@ -407,6 +407,31 @@ def _generate_response(prompt: str, app_config=None) -> str:
         return f"Error: {_sanitize_error_message(e)}"
 
 
+def generate_vision_response(prompt: str, image_bytes, app_config=None) -> str:
+    """
+    使用当前 OpenAI-compatible Provider 分析压缩代表帧。
+
+    @param prompt 视觉分析任务说明，不包含原始视频路径。
+    @param image_bytes 已压缩的代表帧字节序列。
+    @param app_config 可选的提交时 LLM 配置快照。
+    @returns 模型原始文本；失败时返回脱敏的 `Error: ...` 文本。
+    """
+    from app.services.llm_vision import generate_vision_response as _generate_vision
+
+    return _generate_vision(prompt, image_bytes, app_config=app_config)
+
+
+def generate_shot_plan(prompt: str, app_config=None) -> str:
+    """
+    为本地素材匹配请求一次语义拆镜。
+
+    @param prompt 拆镜任务说明，包含完整文案与原文长度。
+    @param app_config 可选的提交时 LLM 配置快照。
+    @returns 模型原始文本；失败时返回脱敏的 `Error: ...` 文本。
+    """
+    return _generate_response(prompt=prompt, app_config=app_config)
+
+
 def test_connection() -> tuple[bool, str, float]:
     """
     使用当前 Provider 配置发起一次最小请求，验证实际生成链路是否可用。

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, redirect_stdout
 from functools import lru_cache
 from typing import List
@@ -75,6 +76,7 @@ fps = 30
 # 这里给视频素材多留一个很小的安全余量，避免音频末尾因为帧舍入出现黑屏、
 # 卡顿或最后一小段旁白没有画面的情况。
 _VIDEO_DURATION_SAFETY_MARGIN = 0.1
+_TIMELINE_EPSILON_SECONDS = 0.02
 _MIN_MATERIAL_DIMENSION = 480
 # 消息类应用和部分编码器会把画面尺寸向下取整，例如 WhatsApp 会把 9:16 的
 # 素材压成 478x850，比 480 少两个像素。直接按 480 硬卡会让这类素材全部被
@@ -474,6 +476,157 @@ def concat_video_clips_with_ffmpeg(
         delete_files(concat_list_file)
 
 
+def _apply_video_transition(clip, transition_value: str | None, side: str):
+    """Apply the configured transition without changing the local timeline contract."""
+    if transition_value in (None, VideoTransitionMode.none.value):
+        return clip
+    if transition_value == VideoTransitionMode.fade_in.value:
+        return video_effects.fadein_transition(clip, 1)
+    if transition_value == VideoTransitionMode.fade_out.value:
+        return video_effects.fadeout_transition(clip, 1)
+    if transition_value == VideoTransitionMode.slide_in.value:
+        return video_effects.slidein_transition(clip, 1, side)
+    if transition_value == VideoTransitionMode.slide_out.value:
+        return video_effects.slideout_transition(clip, 1, side)
+    if transition_value == VideoTransitionMode.zoom_in.value:
+        return video_effects.zoomin_transition(clip, 1)
+    if transition_value == VideoTransitionMode.zoom_out.value:
+        return video_effects.zoomout_transition(clip, 1)
+    if transition_value == VideoTransitionMode.shuffle.value:
+        transition = random.choice(
+            (
+                video_effects.fadein_transition,
+                video_effects.fadeout_transition,
+                video_effects.zoomin_transition,
+                video_effects.zoomout_transition,
+            )
+        )
+        return transition(clip, 1)
+    raise ValueError(f"unsupported video transition mode: {transition_value}")
+
+
+def _validate_storyboard_timeline(
+    timeline: Sequence[Mapping[str, object]], audio_duration: float
+) -> tuple[dict[str, object], ...]:
+    """Validate contiguous target ranges before opening or encoding source clips."""
+    if not math.isfinite(audio_duration) or audio_duration <= 0:
+        raise ValueError("audio duration must be positive")
+    if not isinstance(timeline, Sequence) or isinstance(timeline, (str, bytes)):
+        raise ValueError("storyboard timeline must be a sequence")
+    if not timeline:
+        raise ValueError("storyboard timeline must not be empty")
+    normalized: list[dict[str, object]] = []
+    expected_start = 0.0
+    for index, raw_item in enumerate(timeline, start=1):
+        if not isinstance(raw_item, Mapping):
+            raise ValueError(f"storyboard timeline item {index} must be an object")
+        source_path = str(raw_item.get("source_path", "")).strip()
+        if not source_path:
+            raise ValueError(f"storyboard timeline item {index} has no source path")
+        try:
+            source_start = float(raw_item["source_start_seconds"])
+            source_end = float(raw_item["source_end_seconds"])
+            target_start = float(raw_item["target_start_seconds"])
+            target_end = float(raw_item["target_end_seconds"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"storyboard timeline item {index} has invalid range") from exc
+        values = (source_start, source_end, target_start, target_end)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError(f"storyboard timeline item {index} has non-finite range")
+        if source_start < 0 or source_end <= source_start:
+            raise ValueError(f"storyboard source range is invalid at item {index}")
+        if target_start < 0 or target_end <= target_start:
+            raise ValueError(f"storyboard target range is invalid at item {index}")
+        if abs(target_start - expected_start) > _TIMELINE_EPSILON_SECONDS:
+            raise ValueError(f"storyboard target timeline has a gap at item {index}")
+        normalized.append(
+            {
+                "source_path": source_path,
+                "source_start_seconds": source_start,
+                "source_end_seconds": source_end,
+                "target_start_seconds": target_start,
+                "target_end_seconds": target_end,
+            }
+        )
+        expected_start = target_end
+    if abs(expected_start - audio_duration) > _TIMELINE_EPSILON_SECONDS:
+        raise ValueError("storyboard target timeline does not cover the audio")
+    return tuple(normalized)
+
+
+def _combine_storyboard_timeline(
+    timeline: Sequence[Mapping[str, object]],
+    *,
+    audio_duration: float,
+    output_dir: str,
+    video_width: int,
+    video_height: int,
+    fit_mode: VideoFitMode,
+    transition_value: str | None,
+    threads: int,
+    clip_speed: float,
+    output_file: str,
+) -> str:
+    """Render each frozen source range exactly once and concatenate it once."""
+    normalized = _validate_storyboard_timeline(timeline, audio_duration)
+    clip_files: list[str] = []
+    try:
+        for index, item in enumerate(normalized, start=1):
+            source_clip = None
+            clip = None
+            try:
+                source_clip = _open_video_clip_quietly(str(item["source_path"]))
+                source_duration = float(source_clip.duration)
+                source_start = float(item["source_start_seconds"])
+                source_end = float(item["source_end_seconds"])
+                target_duration = float(item["target_end_seconds"]) - float(
+                    item["target_start_seconds"]
+                )
+                if source_end > source_duration + _TIMELINE_EPSILON_SECONDS:
+                    raise ValueError(
+                        f"source segment exceeds media duration at item {index}"
+                    )
+                clip = source_clip.subclipped(source_start, source_end)
+                if clip_speed != 1.0:
+                    clip = clip.with_speed_scaled(clip_speed)
+                if abs(float(clip.duration) - target_duration) > _TIMELINE_EPSILON_SECONDS:
+                    raise ValueError(
+                        f"source segment duration does not match target at item {index}"
+                    )
+                clip_width, clip_height = clip.size
+                if clip_width != video_width or clip_height != video_height:
+                    clip = _fit_clip_to_canvas(
+                        clip,
+                        target_width=video_width,
+                        target_height=video_height,
+                        fit_mode=fit_mode,
+                    )
+                clip = _apply_video_transition(clip, transition_value, "left")
+                clip_file = os.path.join(output_dir, f"storyboard-clip-{index}.mp4")
+                _write_videofile_with_codec_fallback(
+                    clip,
+                    clip_file,
+                    codec=_get_configured_video_codec(),
+                    logger=None,
+                    fps=fps,
+                )
+                clip_files.append(clip_file)
+            finally:
+                close_clip(clip)
+                if source_clip is not clip:
+                    close_clip(source_clip)
+        concat_video_clips_with_ffmpeg(
+            clip_files=clip_files,
+            output_file=output_file,
+            threads=threads,
+            output_dir=output_dir,
+            max_duration=audio_duration,
+        )
+        return output_file
+    finally:
+        delete_files(clip_files)
+
+
 def _sanitize_image_file(image_path: str) -> str:
     # 某些本地图片虽然能被 Pillow 打开，但会因为损坏的 EXIF/eXIf 元数据导致
     # ImageClip 在解析阶段直接抛异常。这里重新导出一份“干净图片”，把坏元数据剥离掉。
@@ -689,7 +842,26 @@ def combine_videos(
     threads: int = 2,
     clip_speed: float = 1.0,
     video_fit_mode: VideoFitMode = VideoFitMode.cover,
+    *,
+    storyboard_timeline: Sequence[Mapping[str, object]] | None = None,
 ) -> str:
+    """
+    拼接普通素材列表，或按冻结的本地分镜时间轴裁切并拼接素材。
+
+    @param combined_video_path 输出的中间视频路径。
+    @param video_paths 普通模式下的素材路径列表。
+    @param audio_file 旁白音频路径，用于确定目标时长。
+    @param video_aspect 输出画幅。
+    @param video_concat_mode 普通模式的拼接策略。
+    @param video_transition_mode 片段转场模式。
+    @param max_clip_duration 普通模式的单片段目标时长。
+    @param threads FFmpeg 线程数。
+    @param clip_speed 素材播放速度。
+    @param video_fit_mode 画幅不一致时的适配模式。
+    @param storyboard_timeline 本地分镜的源/目标时间范围；None 使用旧逻辑。
+    @returns 已写入的中间视频路径。
+    @raises ValueError 时间轴不连续、超出源视频或无法覆盖音频时长。
+    """
     audio_clip = AudioFileClip(audio_file)
     try:
         # 这里只需要读取旁白音频时长来决定素材视频拼接长度；后续不会再使用
@@ -723,6 +895,20 @@ def combine_videos(
     aspect = VideoAspect(video_aspect)
     fit_mode = VideoFitMode(video_fit_mode)
     video_width, video_height = aspect.to_resolution()
+
+    if storyboard_timeline is not None:
+        return _combine_storyboard_timeline(
+            storyboard_timeline,
+            audio_duration=audio_duration,
+            output_dir=output_dir,
+            video_width=video_width,
+            video_height=video_height,
+            fit_mode=fit_mode,
+            transition_value=transition_value,
+            threads=threads,
+            clip_speed=normalized_clip_speed,
+            output_file=combined_video_path,
+        )
 
     processed_clips = []
     subclipped_items = []
@@ -1483,7 +1669,34 @@ def render_image_zoom_video(image_path: str, clip_duration: int = 5) -> str:
         close_clip(clip)
 
 
-def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
+def _resolve_local_material_path(
+    unsafe_path: str,
+    allowed_directories: Sequence[str],
+) -> str:
+    """在一组已批准的本地素材目录中解析用户提供的素材路径。"""
+    last_error = ValueError("local material file does not exist")
+    for directory in allowed_directories:
+        try:
+            return file_security.resolve_path_within_directory(directory, unsafe_path)
+        except ValueError as exc:
+            last_error = exc
+    raise last_error
+
+
+def preprocess_video(
+    materials: List[MaterialInfo],
+    clip_duration=4,
+    *,
+    allowed_directories: Sequence[str] | None = None,
+):
+    """
+    校验并预处理本地视频/图片素材。
+
+    @param materials MPT 本地素材参数列表。
+    @param clip_duration 图片素材转换成视频时使用的时长。
+    @param allowed_directories 额外允许的素材根目录；默认仅使用上传目录。
+    @returns 通过校验并可供后续合成的素材列表。
+    """
     # WebUI 在某些二次生成场景下可能传入空素材列表，这里直接返回空结果，避免抛出 NoneType 异常。
     if not materials:
         return []
@@ -1491,14 +1704,20 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
     # 仅返回通过预处理校验的素材，避免低分辨率图片继续进入后续的视频合成流程。
     valid_materials = []
     local_videos_dir = utils.storage_dir("local_videos", create=True)
+    material_directories = [local_videos_dir]
+    for directory in allowed_directories or ():
+        resolved_directory = os.path.realpath(str(directory))
+        if resolved_directory not in material_directories:
+            material_directories.append(resolved_directory)
 
     for material in materials:
         if not material.url:
             continue
 
         try:
-            material_source_path = file_security.resolve_path_within_directory(
-                local_videos_dir, material.url
+            material_source_path = _resolve_local_material_path(
+                material.url,
+                material_directories,
             )
         except ValueError as exc:
             # local video_source 的素材路径来自 API 参数，必须限制在专用素材目录。

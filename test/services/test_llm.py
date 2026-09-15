@@ -23,6 +23,7 @@ from app.models.llm_provider import (
 )
 from app.models.schema import VideoScriptRequest, VideoSocialMetadataRequest
 from app.services import llm
+from app.services import llm_vision
 
 RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() in {
     "1",
@@ -286,6 +287,41 @@ class TestLLMConnection(unittest.TestCase):
             result = llm.test_connection()
 
         self.assertEqual(result, (False, "LLM returned an empty response", 1.0))
+
+    def test_vision_response_sends_frames_as_data_urls(self):
+        """视觉索引只发送代表帧，不把本地文件路径交给模型。"""
+        app_config = {
+            "llm_provider": "openai",
+            "openai_api_key": "vision-key",
+            "openai_base_url": "https://example.test/v1",
+            "openai_model_name": "vision-model",
+        }
+
+        class FakeCompletions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                message = types.SimpleNamespace(content='{"ok": true}')
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=message)]
+                )
+
+        completions = FakeCompletions()
+        fake_client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=completions)
+        )
+        with (
+            patch.object(llm_vision, "OpenAI", return_value=fake_client),
+        ):
+            result = llm.generate_vision_response(
+                "Describe the frames.",
+                [b"jpeg-frame"],
+                app_config=app_config,
+            )
+
+        self.assertEqual(result, '{"ok": true}')
+        content = completions.kwargs["messages"][0]["content"]
+        self.assertEqual(content[0], {"type": "text", "text": "Describe the frames."})
+        self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,"))
 
 
 class TestLiteLLMProvider(unittest.TestCase):

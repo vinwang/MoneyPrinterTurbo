@@ -1,0 +1,16 @@
+{
+  "summary": {
+    "case_count": 7,
+    "shot_count": 11,
+    "gap_shots": 1,
+    "scored_expectations": 10,
+    "top1_hit_rate": 0.7,
+    "top3_available_rate": 1.0,
+    "false_gap_rate": 0.0,
+    "forbidden_hit_rate": 0.1,
+    "expected_gaps": 1,
+    "expected_gap_honour_rate": 1.0,
+    "unmatched_expectation_count": 0,
+    "cases_with_incomplete_script_coverage": []
+  }
+}

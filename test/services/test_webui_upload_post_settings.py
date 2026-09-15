@@ -1,8 +1,16 @@
 from unittest.mock import patch
 from pathlib import Path
+
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from app.config import config
+
+# 自动发布的设置页签当前在 WebUI 中隐藏，设置弹窗不再渲染这些控件；
+# upload_post 服务本身未改动。恢复设置页签时删掉下面的 pytestmark 即可重新启用断言。
+pytestmark = pytest.mark.skip(
+    reason="auto-publish settings entry is hidden in the WebUI"
+)
 
 ROOT_DIR = Path(__file__).parent.parent.parent
 WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"

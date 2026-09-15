@@ -456,6 +456,26 @@ class TestVideoService(unittest.TestCase):
 
         self.assertEqual(materials, [])
 
+    def test_preprocess_video_accepts_configured_library_root_only_when_explicit(self):
+        """自动匹配素材可读取配置库，但默认 API 白名单仍保持不变。"""
+        with tempfile.TemporaryDirectory() as directory:
+            library_root = Path(directory)
+            source_path = library_root / "library-clip.mp4"
+            source_path.write_bytes(b"not-a-real-video")
+            material = MaterialInfo(provider="local", url="library-clip.mp4")
+
+            fake_clip = _FakeMoviePyClip(duration=2)
+            fake_clip.size = (640, 640)
+            with patch.object(vd, "_open_video_clip_quietly", return_value=fake_clip):
+                result = vd.preprocess_video(
+                    [material],
+                    clip_duration=4,
+                    allowed_directories=[str(library_root)],
+                )
+
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].url, str(source_path.resolve()))
+
     def test_get_bgm_file_accepts_song_directory_filename(self):
         """
         BGM 列表接口现在只暴露文件名；生成视频时应能把文件名安全解析回

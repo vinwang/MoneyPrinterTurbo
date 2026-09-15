@@ -4,6 +4,7 @@ import re
 import socket
 import threading
 import time
+from collections.abc import Callable, Sequence
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from functools import partial
 from os import path
@@ -13,9 +14,12 @@ from loguru import logger
 
 from app.config import config
 from app.models import const
-from app.models.schema import VideoConcatMode, VideoParams
+from app.models.schema import MaterialInfo, VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
 from app.services import (
+    asset_library,
+    asset_library_runtime,
+    asset_matching,
     elevenlabs_music,
     llm,
     loomloom,
@@ -359,6 +363,21 @@ def save_script_data(task_id, video_script, video_terms, params):
     task_artifacts.write_script_data(task_id, script_data)
 
 
+def _record_successful_local_asset_usage(params: VideoParams) -> None:
+    """仅在最终成片成功后登记实际执行过的本地素材资产。"""
+    asset_ids = [
+        str(item.get("asset_id", "")).strip()
+        for item in params.local_storyboard_plan or ()
+        if isinstance(item, dict)
+        and item.get("source_kind") != "manifest"
+        and str(item.get("asset_id", "")).strip()
+    ]
+    bgm_asset_id = str(params.local_bgm_asset_id or "").strip()
+    if bgm_asset_id:
+        asset_ids.append(bgm_asset_id)
+    asset_library_runtime.record_usage(tuple(dict.fromkeys(asset_ids)))
+
+
 def resolve_custom_audio_file(
     task_id: str,
     custom_audio_file: str | None,
@@ -596,7 +615,9 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
         )
         return ""
 
-    is_word_level = getattr(params, "subtitle_display_mode", "sentence") == "word_by_word"
+    is_word_level = (
+        getattr(params, "subtitle_display_mode", "sentence") == "word_by_word"
+    )
 
     if subtitle_provider == "edge":
         voice.create_subtitle(
@@ -641,10 +662,91 @@ def get_video_materials(
     audio_duration,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
 ):
+    """
+    Prepare video materials for a task, using a frozen local storyboard when present.
+
+    @param task_id Stable task identifier used for snapshots and task state.
+    @param params Validated video parameters and optional local storyboard plan.
+    @param video_terms Search terms for non-local material providers.
+    @param audio_duration Narration duration used by material providers.
+    @param loomloom_video_request Optional confirmed paid-video request.
+    @returns Ordered local paths or provider output paths; None on handled failure.
+    """
     if params.video_source == "local":
+        storyboard_plan = params.local_storyboard_plan
+        if storyboard_plan:
+            logger.info("\n\n## snapshot and validate local storyboard materials")
+            try:
+                is_manifest_storyboard = any(
+                    isinstance(item, dict) and item.get("source_kind") == "manifest"
+                    for item in storyboard_plan
+                )
+                if is_manifest_storyboard and not all(
+                    isinstance(item, dict) and item.get("source_kind") == "manifest"
+                    for item in storyboard_plan
+                ):
+                    raise asset_library.AssetLibraryError(
+                        "storyboard plan mixes manifest and library sources"
+                    )
+                materialized_plan = (
+                    asset_library_runtime.materialize_manifest_storyboard_sources(
+                        task_id,
+                        storyboard_plan,
+                    )
+                    if is_manifest_storyboard
+                    else asset_library_runtime.materialize_storyboard_sources(
+                        task_id,
+                        storyboard_plan,
+                    )
+                )
+                unique_materials: dict[str, MaterialInfo] = {}
+                for item in materialized_plan:
+                    source_path = str(item["source_path"])
+                    unique_materials.setdefault(
+                        str(item["asset_id"]),
+                        MaterialInfo(provider="local", url=source_path),
+                    )
+                allowed_directories = [utils.task_dir(task_id)]
+                if is_manifest_storyboard:
+                    allowed_directories.append(
+                        utils.storage_dir("local_videos", create=True)
+                    )
+                validated = video.preprocess_video(
+                    materials=list(unique_materials.values()),
+                    clip_duration=params.video_clip_duration,
+                    allowed_directories=allowed_directories,
+                )
+                validated_by_asset = {
+                    asset_id: material.url
+                    for asset_id, material in zip(unique_materials, validated)
+                }
+                if len(validated_by_asset) != len(unique_materials):
+                    raise asset_library.AssetLibraryError(
+                        "one or more selected storyboard materials failed validation"
+                    )
+                params.local_storyboard_plan = [
+                    {
+                        **item,
+                        "source_path": validated_by_asset[str(item["asset_id"])],
+                    }
+                    for item in materialized_plan
+                ]
+                return tuple(dict.fromkeys(validated_by_asset.values()))
+            except asset_library.AssetLibraryError as exc:
+                raise asset_library.AssetLibraryError(
+                    f"local storyboard material preparation failed: {exc}"
+                ) from exc
+
         logger.info("\n\n## preprocess local materials")
+        allowed_directories = []
+        library_root = asset_library.configured_video_root()
+        if library_root is not None:
+            allowed_directories.append(str(library_root))
+        allowed_directories.append(utils.storage_dir("local_videos", create=True))
         materials = video.preprocess_video(
-            materials=params.video_materials, clip_duration=params.video_clip_duration
+            materials=params.video_materials,
+            clip_duration=params.video_clip_duration,
+            allowed_directories=allowed_directories,
         )
         if not materials:
             _mark_task_failed(
@@ -755,9 +857,7 @@ def get_video_materials(
             # 与方舟同一恢复语义：未确认状态和已生成但下载失败都对应一个可在
             # OFox 控制台恢复的远端任务，统一从异常携带的 task_id 写入失败状态。
             remote_task_id = str(getattr(exc, "task_id", "") or "").strip()
-            details = (
-                {"ofox_task_id": remote_task_id} if remote_task_id else None
-            )
+            details = {"ofox_task_id": remote_task_id} if remote_task_id else None
             _mark_task_failed(
                 task_id,
                 "materials",
@@ -836,6 +936,17 @@ def _record_loomloom_run_reference(
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
 ):
+    """
+    Combine materials, attach audio/subtitles, and create each requested output.
+
+    @param task_id Stable task identifier used for output paths and progress.
+    @param params Validated video parameters.
+    @param downloaded_videos Ordered material paths or frozen storyboard sources.
+    @param audio_file Narration audio path.
+    @param subtitle_path Optional generated subtitle path.
+    @param audio_duration Narration duration in seconds.
+    @returns Tuple of final paths, combined paths, and structured warnings.
+    """
     final_video_paths = []
     combined_video_paths = []
     warnings = []
@@ -861,17 +972,22 @@ def generate_final_videos(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
         logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
+        combine_kwargs = {
+            "combined_video_path": combined_video_path,
+            "video_paths": downloaded_videos,
+            "audio_file": audio_file,
+            "video_aspect": params.video_aspect,
+            "video_fit_mode": params.video_fit_mode,
+            "video_concat_mode": video_concat_mode,
+            "video_transition_mode": video_transition_mode,
+            "max_clip_duration": params.video_clip_duration,
+            "threads": params.n_threads,
+            "clip_speed": params.video_clip_speed,
+        }
+        if params.video_source == "local" and params.local_storyboard_plan:
+            combine_kwargs["storyboard_timeline"] = params.local_storyboard_plan
         video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_fit_mode=params.video_fit_mode,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-            clip_speed=params.video_clip_speed,
+            **combine_kwargs,
         )
 
         _progress += 50 / params.video_count / 2
@@ -1288,7 +1404,21 @@ def _run_pipeline(
     voice_preview: dict | None = None,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
     allow_server_file_input: bool = False,
+    post_process_callback: Callable[[str, tuple[str, ...]], Sequence[str]]
+    | None = None,
 ):
+    """
+    Execute the MPT generation stages and optionally post-process before publishing.
+
+    @param task_id Stable task identifier used by the state store.
+    @param params Validated MPT video parameters.
+    @param stop_at Last stage to execute.
+    @param voice_preview Optional prepared voice preview payload.
+    @param loomloom_video_request Optional confirmed paid-video request.
+    @param allow_server_file_input Whether local CLI file paths are allowed.
+    @param post_process_callback Optional callback applied before cross-post scheduling.
+    @returns Task result dictionary containing outputs or a structured failure.
+    """
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
 
@@ -1472,20 +1602,46 @@ def _run_pipeline(
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
+    if params.video_source == "local" and params.local_storyboard_plan:
+        try:
+            params.local_storyboard_plan = list(
+                asset_matching.align_storyboard_plan(
+                    params.local_storyboard_plan,
+                    audio_duration=audio_duration,
+                    subtitle_path=subtitle_path,
+                    clip_speed=float(params.video_clip_speed or 1.0),
+                )
+            )
+        except asset_library.AssetLibraryError as exc:
+            return _mark_task_failed(task_id, "storyboard", str(exc))
+
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id,
-        params,
-        video_terms,
-        audio_duration,
-        loomloom_video_request=loomloom_video_request,
-    )
+    try:
+        downloaded_videos = get_video_materials(
+            task_id,
+            params,
+            video_terms,
+            audio_duration,
+            loomloom_video_request=loomloom_video_request,
+        )
+    except asset_library.AssetLibraryError as exc:
+        return _mark_task_failed(task_id, "materials", str(exc))
     if not downloaded_videos:
         return _mark_task_failed(
             task_id,
             "materials",
             "failed to prepare video materials",
         )
+
+    if params.video_source == "local" and params.local_storyboard_plan:
+        try:
+            save_script_data(task_id, video_script, video_terms, params)
+        except Exception as exc:
+            return _mark_task_failed(
+                task_id,
+                "storyboard",
+                f"cannot persist storyboard snapshot: {type(exc).__name__}: {exc}",
+            )
 
     if stop_at == "materials":
         sm.state.update_task(
@@ -1522,6 +1678,36 @@ def _run_pipeline(
             "failed to generate final video",
         )
 
+    if post_process_callback is not None:
+        try:
+            processed_video_paths = tuple(
+                post_process_callback(task_id, tuple(final_video_paths))
+            )
+        except Exception as exc:
+            return _mark_task_failed(
+                task_id,
+                "post_process",
+                f"{type(exc).__name__}: {exc}",
+            )
+        if len(processed_video_paths) != len(final_video_paths) or any(
+            not isinstance(video_path, str) or not video_path.strip()
+            for video_path in processed_video_paths
+        ):
+            return _mark_task_failed(
+                task_id,
+                "post_process",
+                "post-process callback returned an invalid video path list",
+            )
+        final_video_paths = list(processed_video_paths)
+
+    if params.video_source == "local" and (
+        params.local_storyboard_plan or params.local_bgm_asset_id
+    ):
+        try:
+            _record_successful_local_asset_usage(params)
+        except asset_library.AssetLibraryError as exc:
+            return _mark_task_failed(task_id, "asset_usage", str(exc))
+
     logger.success(
         f"task {task_id} finished, generated {len(final_video_paths)} videos."
     )
@@ -1556,6 +1742,15 @@ def _run_pipeline(
         "cross_post_error": None,
         "cross_post_owner": _cross_post_process_owner if should_cross_post else None,
         "warnings": generation_warnings or None,
+        "post_process_state": "complete" if post_process_callback is not None else None,
+        "storyboard_plan": (
+            params.local_storyboard_plan
+            if params.video_source == "local"
+            else None
+        ),
+        "local_bgm_asset_id": (
+            params.local_bgm_asset_id if params.video_source == "local" else None
+        ),
     }
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
@@ -1589,12 +1784,23 @@ def start(
     voice_preview: dict | None = None,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
     allow_server_file_input: bool = False,
+    post_process_callback: Callable[[str, tuple[str, ...]], Sequence[str]]
+    | None = None,
 ):
     """
     执行任务流水线，并确保未预期异常也会转换成可查询的失败状态。
 
     ``allow_server_file_input`` 只供本机 CLI 使用。HTTP API 和 WebUI 必须保持
     默认值，让自定义音频始终受当前任务目录约束。
+
+    @param task_id Stable task identifier used by the state store.
+    @param params Validated MPT video parameters.
+    @param stop_at Last stage to execute.
+    @param voice_preview Optional prepared voice preview payload.
+    @param loomloom_video_request Optional confirmed paid-video request.
+    @param allow_server_file_input Whether local CLI file paths are allowed.
+    @param post_process_callback Optional callback applied before cross-post scheduling.
+    @returns Task result dictionary containing outputs or a structured failure.
     """
     try:
         return _run_pipeline(
@@ -1604,6 +1810,7 @@ def start(
             voice_preview=voice_preview,
             loomloom_video_request=loomloom_video_request,
             allow_server_file_input=allow_server_file_input,
+            post_process_callback=post_process_callback,
         )
     except Exception as exc:
         logger.exception(

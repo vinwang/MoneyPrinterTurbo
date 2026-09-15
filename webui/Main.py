@@ -45,6 +45,11 @@ from app.models.schema import (
 )
 from app.services import bgm as bgm_service
 from app.services import (
+    asset_library,
+    asset_library_import,
+    asset_library_runtime,
+    asset_matching,
+    asset_shot_planner,
     cache_manager,
     llm,
     loomloom,
@@ -63,6 +68,12 @@ from app.services import task as tm
 from app.services import version_checker
 from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
+from scripts.output_profiles import BUILTIN_PROFILES
+from scripts.webui_adapter import (
+    WebUIAdapterError,
+    build_webui_spec,
+    save_webui_spec,
+)
 
 st.set_page_config(
     page_title="MoneyPrinterTurbo",
@@ -143,6 +154,7 @@ DEFAULT_SUBTITLE_SETTINGS = {
     "subtitle_background_color": "#000000",
     "rounded_subtitle_background": False,
 }
+DEFAULT_POST_PROCESS_FONT = "MicrosoftYaHeiBold.ttc"
 LOCAL_MATERIAL_EXTENSIONS = {
     ".mp4",
     ".mov",
@@ -154,6 +166,15 @@ LOCAL_MATERIAL_EXTENSIONS = {
     ".png",
 }
 CUSTOM_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+POST_PROCESS_LOGO_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+POST_PROCESS_LOGO_DIR = "advertising_assets/watermark"
+POST_PROCESS_IMAGE_DIR = "advertising_assets/images"
+POST_PROCESS_OUTPUT_DIR = "advertising_output"
+POST_PROCESS_HEIGHT_RATIO_MIN = 0.01
+POST_PROCESS_HEIGHT_RATIO_MAX = 0.5
+POST_PROCESS_HEIGHT_RATIO_STEP = 0.01
+POST_PROCESS_OPACITY_STEP = 0.01
+POST_PROCESS_RATIO_STEP = 0.01
 _FINAL_VIDEO_PATTERN = re.compile(
     r"^final-(?P<index>\d+)\.(?P<extension>mp4|mov|mkv|webm)$",
     re.IGNORECASE,
@@ -161,18 +182,10 @@ _FINAL_VIDEO_PATTERN = re.compile(
 _DOWNLOAD_FILENAME_INVALID_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WINDOWS_RESERVED_FILENAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
-    | {
-        f"{prefix}{number}"
-        for prefix in ("COM", "LPT")
-        for number in range(1, 10)
-    }
+    | {f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)}
     # Win32 还会把 Latin-1 上标数字 ¹、²、³ 识别为设备编号。虽然这类主题
     # 很少见，但仍会导致 Windows 下载失败，因此与普通数字保留名统一处理。
-    | {
-        f"{prefix}{number}"
-        for prefix in ("COM", "LPT")
-        for number in ("¹", "²", "³")
-    }
+    | {f"{prefix}{number}" for prefix in ("COM", "LPT") for number in ("¹", "²", "³")}
 )
 _RUNTIME_CONFIG_SECTIONS = {
     "app": config.app,
@@ -226,9 +239,7 @@ CREDENTIAL_COMPANION_KEYS = {
     ),
 }
 
-NON_LLM_COMPANION_KEYS = {
-    "app": ("upload_post_username",)
-}
+NON_LLM_COMPANION_KEYS = {"app": ("upload_post_username",)}
 # 同一个密钥在不同面板可能使用各自的控件 key：音频面板直接编辑 Gemini 和
 # MiMo 的 LLM 密钥。恢复备份时必须清除每一个别名，否则遗留的旧值
 # 会在下一次 rerun 覆盖刚刚恢复的密钥。
@@ -371,6 +382,320 @@ def _run_llm_read_operation(operation_name, operation):
         f"operation={operation_name}"
     )
     return operation(app_config_snapshot)
+
+
+def _library_signature(video_root, bgm_root):
+    """返回素材库根目录的稳定签名，用于区分配置变化和普通页面刷新。"""
+    payload = {
+        "video_root": str(video_root or ""),
+        "bgm_root": str(bgm_root or ""),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _clear_local_storyboard_widgets():
+    """清除旧分镜控件状态，防止素材库或文案变化时复用无效 ID。"""
+    for key in tuple(st.session_state):
+        if str(key).startswith("local_storyboard_shot_"):
+            st.session_state.pop(key, None)
+    st.session_state["local_storyboard_selected_ids"] = {}
+    st.session_state["local_library_bgm_id"] = ""
+    st.session_state["local_library_bgm_candidates"] = ()
+
+
+def _library_candidate_label(asset):
+    """生成不暴露绝对路径的素材候选展示文本。"""
+    return f"{asset.category}/{asset.name}"
+
+
+def _render_local_asset_library_settings(panel):
+    """
+    渲染本地视频和 BGM 素材库目录设置及增量扫描入口。
+
+    @param panel 设置对话框中的素材配置面板。
+    @returns None；目录配置和扫描结果写入运行时配置及 session state。
+    """
+    with panel:
+        with st.container(border=True):
+            st.markdown(f"#### {tr('Local Asset Library')}")
+            st.caption(tr("Local Asset Library Help"))
+            video_root_value = st.text_input(
+                tr("Local Video Library Directory"),
+                value=str(config.app.get("local_video_library_directory", "") or ""),
+                key="local_video_library_directory_input",
+            ).strip()
+            bgm_root_value = st.text_input(
+                tr("Local BGM Library Directory"),
+                value=str(config.app.get("local_bgm_library_directory", "") or ""),
+                key="local_bgm_library_directory_input",
+            ).strip()
+            _set_runtime_config(
+                "app", "local_video_library_directory", video_root_value
+            )
+            _set_runtime_config("app", "local_bgm_library_directory", bgm_root_value)
+            if st.button(
+                tr("Update Local Asset Index"),
+                key="update_local_asset_index_button",
+                use_container_width=True,
+                type="secondary",
+            ):
+                try:
+                    video_root = asset_library.configured_video_root()
+                    if video_root is None:
+                        raise asset_library.AssetLibraryError(
+                            "local video library directory is not configured"
+                        )
+                    summary = _run_llm_read_operation(
+                        "update_local_asset_index",
+                        lambda app_config_snapshot: asset_library.scan_library(
+                            video_root,
+                            asset_library.configured_bgm_root(),
+                            retry_failed=True,
+                            app_config=app_config_snapshot,
+                        ),
+                    )
+                except asset_library.AssetLibraryError as exc:
+                    st.error(f"{tr('Local Asset Index Failed')}: {exc}")
+                else:
+                    root_signature = _library_signature(
+                        video_root,
+                        asset_library.configured_bgm_root(),
+                    )
+                    st.session_state["local_library_scan_signature"] = root_signature
+                    st.session_state["local_library_scan_summary"] = summary
+                    st.session_state["local_library_error"] = ""
+                    st.session_state["local_storyboard_signature"] = ""
+                    st.session_state["local_storyboard_match"] = None
+                    _clear_local_storyboard_widgets()
+                    st.success(
+                        tr("Local Asset Index Updated").format(
+                            added=summary.added,
+                            updated=summary.updated,
+                            analyzed=summary.analyzed,
+                        )
+                    )
+
+
+def _render_storyboard_match(match):
+    """
+    渲染自动分镜候选，并把用户选择保存到当前会话。
+
+    @param match `asset_matching.StoryboardMatch` 匹配结果。
+    @returns None；选择结果写入 Streamlit session state。
+    """
+    # 候选已按匹配结果自动选好首选，默认折叠；想换镜头再展开，避免每次编辑文案
+    # 都把整页候选铺开。视频预览另由开关控制，不勾选时不加载任何播放器。
+    selected_ids = {}
+    with st.expander(
+        tr("Storyboard Auto Selected").format(count=len(match.shots)),
+        expanded=False,
+    ):
+        show_preview = st.checkbox(
+            tr("Show Storyboard Video Preview"),
+            key="local_storyboard_show_preview",
+        )
+        for shot in match.shots:
+            candidate_by_id = {asset.asset_id: asset for asset in shot.candidates}
+            candidate_ids = list(candidate_by_id)
+            if not candidate_ids:
+                st.error(
+                    f"{tr('Local Storyboard Match Failed')}: "
+                    f"no relevant candidate for shot {shot.index}"
+                )
+                st.caption(f"{shot.text} · query: {shot.visual_query or shot.text}")
+                continue
+            saved_id = st.session_state.get("local_storyboard_selected_ids", {}).get(
+                str(shot.index), candidate_ids[0]
+            )
+            if saved_id not in candidate_by_id:
+                saved_id = candidate_ids[0]
+            selected_id = st.selectbox(
+                f"{tr('Storyboard Shot')} {shot.index}: {shot.text}",
+                options=candidate_ids,
+                index=candidate_ids.index(saved_id),
+                format_func=lambda asset_id: _library_candidate_label(
+                    candidate_by_id[asset_id]
+                ),
+                key=f"local_storyboard_shot_{shot.index}",
+            )
+            selected_asset = candidate_by_id[selected_id]
+            selected_ids[str(shot.index)] = selected_id
+            selected_index = candidate_ids.index(selected_id)
+            selected_segment = (
+                shot.candidate_segments[selected_index]
+                if len(shot.candidate_segments) == len(shot.candidates)
+                else None
+            )
+            source_range = (
+                f"source {selected_segment.source_start_seconds:.1f}–"
+                f"{selected_segment.source_end_seconds:.1f}s · "
+                if selected_segment is not None
+                else ""
+            )
+            reason = (
+                shot.candidate_reasons[selected_index]
+                if len(shot.candidate_reasons) == len(shot.candidates)
+                else ""
+            )
+            st.caption(
+                f"target {shot.start_seconds:.1f}–"
+                f"{shot.start_seconds + shot.duration_seconds:.1f}s · "
+                f"{source_range}{_library_candidate_label(selected_asset)}"
+                f"{f' · {reason}' if reason else ''}"
+            )
+            if show_preview:
+                try:
+                    preview_path = asset_library.resolve_asset_path(selected_asset)
+                except asset_library.AssetLibraryError as exc:
+                    st.error(f"{tr('Local Asset Unavailable')}: {exc}")
+                else:
+                    st.video(str(preview_path))
+
+    st.session_state["local_storyboard_selected_ids"] = selected_ids
+    st.session_state["local_library_bgm_candidates"] = match.bgm_candidates
+
+
+def _local_storyboard_query_context(params):
+    """从普通文案任务的主题和视频关键词构造本地匹配上下文。"""
+    values = []
+    subject = str(params.video_subject or "").strip()
+    if subject:
+        values.append(subject)
+    raw_terms = params.video_terms
+    if isinstance(raw_terms, str):
+        values.extend(
+            term.strip()
+            for term in re.split(r"[,，\n]", raw_terms)
+            if term.strip()
+        )
+    elif isinstance(raw_terms, (list, tuple)):
+        values.extend(str(term).strip() for term in raw_terms if str(term).strip())
+    return " ".join(dict.fromkeys(values)) or None
+
+
+def _render_local_library_match(params):
+    """
+    在选择本地视频来源且文案存在时自动扫描并匹配素材库。
+
+    @param params 当前页面正在编辑的 `VideoParams`。
+    @returns None；匹配结果和错误写入页面及 session state。
+    """
+    if params.video_source != "local":
+        return
+    script = str(params.video_script or "").strip()
+    if not script:
+        if st.session_state.get("local_storyboard_selected_ids"):
+            st.session_state["local_storyboard_match"] = None
+            st.session_state["local_storyboard_signature"] = ""
+            _clear_local_storyboard_widgets()
+        st.info(tr("Enter Script to Match Local Materials"))
+        return
+    try:
+        video_root = asset_library.configured_video_root()
+        bgm_root = asset_library.configured_bgm_root()
+    except asset_library.AssetLibraryError as exc:
+        st.error(f"{tr('Local Asset Library Configuration Invalid')}: {exc}")
+        return
+    if video_root is None:
+        st.info(tr("Configure Local Asset Library"))
+        return
+
+    query_context = _local_storyboard_query_context(params)
+    root_signature = _library_signature(video_root, bgm_root)
+    match_signature = hashlib.sha256(
+        json.dumps(
+            {
+                "root": root_signature,
+                "script": script,
+                "clip_duration": params.video_clip_duration,
+                "query_context": query_context,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    needs_match = st.session_state.get("local_storyboard_signature") != match_signature
+    if needs_match:
+        st.session_state["local_storyboard_match"] = None
+        st.session_state["local_storyboard_error"] = ""
+        _clear_local_storyboard_widgets()
+    if st.session_state.get("local_library_scan_signature") != root_signature:
+        # 同一页面会话只自动做一次增量扫描；文案编辑只重新查询已有索引。
+        # 素材目录变化时可在设置面板点击“更新本地素材索引”显式刷新。
+        with st.spinner(tr("Updating Local Asset Index")):
+            try:
+                summary = _run_llm_read_operation(
+                    "scan_local_asset_library",
+                    lambda app_config_snapshot: asset_library.scan_library(
+                        video_root,
+                        bgm_root,
+                        app_config=app_config_snapshot,
+                    ),
+                )
+            except asset_library.AssetLibraryError as exc:
+                st.session_state["local_library_scan_summary"] = None
+                st.session_state["local_library_error"] = str(exc)
+                _clear_local_storyboard_widgets()
+                return
+        st.session_state["local_library_scan_signature"] = root_signature
+        st.session_state["local_library_scan_summary"] = summary
+        st.session_state["local_library_error"] = ""
+        _clear_local_storyboard_widgets()
+
+    summary = st.session_state.get("local_library_scan_summary")
+    if summary and (summary.failed or summary.missing):
+        st.warning(
+            tr("Local Asset Index Warning").format(
+                failed=summary.failed,
+                missing=summary.missing,
+            )
+        )
+    scan_error = str(st.session_state.get("local_library_error", "") or "")
+    if scan_error:
+        st.error(f"{tr('Local Asset Index Failed')}: {scan_error}")
+        return
+
+    if st.session_state.get("local_storyboard_signature") != match_signature:
+        # 拆镜要调文本模型，只在签名变化时做一次；结果随匹配一起缓存，
+        # 编辑其它设置不会重复调用。模型不可用时返回 None，退回标点拆分。
+        with st.spinner(tr("Planning Storyboard Shots")):
+            planned_shots = _run_llm_read_operation(
+                "plan_storyboard_shots",
+                lambda app_config_snapshot: asset_shot_planner.plan_shots(
+                    script,
+                    clip_duration=params.video_clip_duration,
+                    llm_fn=llm.generate_shot_plan,
+                    app_config=app_config_snapshot,
+                ),
+            )
+        try:
+            match = asset_matching.match_storyboard(
+                script,
+                clip_duration=params.video_clip_duration,
+                query_context=query_context,
+                planned_shots=planned_shots,
+                video_root=video_root,
+                bgm_root=bgm_root or "",
+            )
+        except asset_library.AssetLibraryError as exc:
+            st.session_state["local_storyboard_match"] = None
+            st.session_state["local_storyboard_error"] = str(exc)
+            _clear_local_storyboard_widgets()
+        else:
+            st.session_state["local_storyboard_match"] = match
+            st.session_state["local_storyboard_error"] = ""
+            st.session_state["local_storyboard_signature"] = match_signature
+            _clear_local_storyboard_widgets()
+
+    match_error = str(st.session_state.get("local_storyboard_error", "") or "")
+    if match_error:
+        st.error(f"{tr('Local Storyboard Match Failed')}: {match_error}")
+        return
+    match = st.session_state.get("local_storyboard_match")
+    if match:
+        _render_storyboard_match(match)
 
 
 def _parse_chatterbox_voices(voices):
@@ -527,9 +852,7 @@ def _initialize_session_state():
         ),
         "subtitle_enabled_checkbox": _saved_ui_bool("subtitle_enabled", True),
         "stroke_color_picker": _saved_ui_color("stroke_color", "#000000"),
-        "stroke_width_slider": _saved_ui_number(
-            "stroke_width", 1.5, 0.0, 10.0
-        ),
+        "stroke_width_slider": _saved_ui_number("stroke_width", 1.5, 0.0, 10.0),
         "loomloom_candidate_count": _saved_ui_number(
             "loomloom_candidate_count",
             3,
@@ -543,11 +866,35 @@ def _initialize_session_state():
         "ui_language": initial_ui_language,
         # 已落盘的本地素材允许用户只修改文案后继续复用。
         "local_video_materials": [],
+        "local_library_scan_signature": "",
+        "local_library_scan_summary": None,
+        "local_storyboard_signature": "",
+        "local_storyboard_match": None,
+        "local_storyboard_selected_ids": {},
+        "local_library_bgm_id": "",
+        "local_library_add_uploads": True,
+        "local_library_upload_category": "上传导入",
         # 生成按钮回调先登记任务，使顶部入口能立即显示运行中数量。
         "active_generation_tasks": {},
         # 最近一次从当前页面提交的任务。生成改为后台执行后，页面 Fragment
         # 通过这个 ID 查询状态；刷新时不再依赖正在执行的旧页面脚本。
         "current_generation_task_id": "",
+        # 广告后处理设置只保存在当前会话，提交时冻结到任务目录；避免页面 rerun
+        # 修改正在生成任务的 Logo、指定文字或版位参数。
+        "post_process_enabled_checkbox": _saved_ui_bool("post_process_enabled", False),
+        "post_process_profile_id": str(
+            config.ui.get("post_process_profile_id", "portrait-1080x1920")
+            or "portrait-1080x1920"
+        ),
+        "post_process_watermark_enabled_checkbox": _saved_ui_bool(
+            "post_process_watermark_enabled", False
+        ),
+        "post_process_watermark_position": str(
+            config.ui.get("post_process_watermark_position", "top_right") or "top_right"
+        ),
+        "post_process_logo_path": "",
+        "post_process_logo_signature": "",
+        "post_process_text_rows": [],
         # LoomLoom 询价与执行必须跨 Streamlit rerun 保留完全相同的输入和
         # clientRequestId，避免网络重试产生重复付费任务。
         "loomloom_script_batch": None,
@@ -636,6 +983,16 @@ def _find_final_task_video(task_path: str) -> str:
     合成流程还会产生 combined、temp-clip 和 MoviePy 临时文件，这些文件不能
     表示任务已成功完成，因此这里只接受 ``final-<序号>.<扩展名>``。
     """
+    processed_root = os.path.join(task_path, "advertising", "final")
+    processed_candidates = []
+    if os.path.isdir(processed_root):
+        for root, _dirs, files in os.walk(processed_root):
+            for file_name in files:
+                if file_name.lower().endswith((".mp4", ".mov", ".mkv", ".webm")):
+                    processed_candidates.append(os.path.join(root, file_name))
+    if processed_candidates:
+        return sorted(processed_candidates)[0]
+
     try:
         files = os.listdir(task_path)
     except OSError:
@@ -818,6 +1175,18 @@ def _scan_history_tasks(limit=30):
         script_data = _safe_load_task_script(task_path)
         params_data = script_data.get("params", {}) if script_data else {}
         video_file = _find_final_task_video(task_path)
+        post_process_state = (
+            "complete"
+            if video_file
+            and os.path.commonpath(
+                [
+                    os.path.abspath(video_file),
+                    os.path.join(os.path.abspath(task_path), "advertising", "final"),
+                ]
+            )
+            == os.path.join(os.path.abspath(task_path), "advertising", "final")
+            else None
+        )
         subject = (
             params_data.get("video_subject")
             or script_data.get("script", "")[:40]
@@ -832,6 +1201,7 @@ def _scan_history_tasks(limit=30):
                 "mtime": mtime,
                 "task_path": task_path,
                 "video_file": video_file,
+                "post_process_state": post_process_state,
                 "source": "history",
             }
         )
@@ -871,6 +1241,8 @@ def _collect_task_summaries(limit=20):
             "subject": subject,
             "state": task.get("state"),
             "cross_post_state": task.get("cross_post_state"),
+            "post_process_state": task.get("post_process_state")
+            or history_task.get("post_process_state"),
             "progress": int(task.get("progress", 0) or 0),
             "mtime": os.path.getmtime(task_path)
             if os.path.isdir(task_path)
@@ -1392,7 +1764,8 @@ def _apply_restored_params(params):
         "subtitle_position_select", params.get("subtitle_position") or "bottom"
     )
     _set_stable_widget_value(
-        "subtitle_display_mode_select", params.get("subtitle_display_mode") or "sentence"
+        "subtitle_display_mode_select",
+        params.get("subtitle_display_mode") or "sentence",
     )
     _set_stable_widget_value(
         "subtitle_animation_select", params.get("subtitle_animation") or "none"
@@ -1799,6 +2172,9 @@ def _render_generation_task_snapshot(task_id, task):
         return
 
     st.success(tr("Video Generation Completed"))
+    if task.get("post_process_state") == "complete":
+        st.subheader(tr("Final Advertising Video Preview"))
+        st.caption(tr("Final Advertising Video Preview Help"))
     for warning in task.get("warnings") or []:
         if isinstance(warning, Mapping) and warning.get("code") == "sonilo_bgm_failed":
             st.warning(
@@ -1972,8 +2348,10 @@ def format_llm_connection_error(provider_id, base_url, error):
         "unauthorized",
     )
     provider = get_llm_provider(provider_id)
-    if provider is None or not provider.service_endpoints or not any(
-        marker in normalized_error for marker in authentication_markers
+    if (
+        provider is None
+        or not provider.service_endpoints
+        or not any(marker in normalized_error for marker in authentication_markers)
     ):
         return error_text
 
@@ -2896,10 +3274,10 @@ def _render_settings_dialog():
         # 历史 hide_config 只用于隐藏旧基础设置面板。改为固定设置入口后，该值
         # 不再有用户可见意义，统一迁移为 false，避免旧配置影响后续版本。
         _set_runtime_config("app", "hide_config", False)
+        # 自动发布入口暂时隐藏：只移除设置页签，upload_post 服务与中断恢复逻辑保持不变。
         settings_tab_labels = [
             tr("LLM Settings Tab"),
             tr("Material API Tab"),
-            tr("Auto-Publish Settings"),
             tr("Interface Settings Tab"),
             tr("Key Backup Tab"),
             tr("Cache Management Tab"),
@@ -2918,7 +3296,6 @@ def _render_settings_dialog():
         (
             middle_config_panel,
             right_config_panel,
-            publish_config_panel,
             left_config_panel,
             key_backup_panel,
             cache_config_panel,
@@ -2927,84 +3304,6 @@ def _render_settings_dialog():
             key=settings_tabs_key,
             on_change="rerun",
         )
-
-        with publish_config_panel:
-            st.write(tr("Automatically publish generated videos to social media using upload-post.com"))
-            st.info(
-                tr("Upload-Post Setup Guide").format(
-                    api_keys_url=UPLOAD_POST_API_KEYS_URL,
-                    manage_users_url=UPLOAD_POST_MANAGE_USERS_URL,
-                )
-            )
-
-            is_enabled = config.app.get("upload_post_enabled", False)
-            is_auto = config.app.get("upload_post_auto_upload", False)
-
-            # 两个键各自独立:enabled 允许外部流程调用 Upload-Post,
-            # auto_upload 才决定渲染完成后是否自动发布。合并成一个复选框会在
-            # 两键不一致的配置下,仅打开设置对话框就把 enabled 改写为 False。
-            upload_post_enabled = st.checkbox(
-                tr("Enable Upload-Post Integration"),
-                value=is_enabled,
-                key="upload_post_enabled_checkbox"
-            )
-            if upload_post_enabled != is_enabled:
-                _set_runtime_config("app", "upload_post_enabled", upload_post_enabled)
-
-            upload_post_auto_upload = st.checkbox(
-                tr("Enable Auto-Publish"),
-                value=is_auto,
-                key="upload_post_auto_upload_checkbox"
-            )
-            if upload_post_auto_upload != is_auto:
-                _set_runtime_config("app", "upload_post_auto_upload", upload_post_auto_upload)
-
-            upload_post_api_key = st.text_input(
-                tr("Upload-Post API Key"),
-                value=config.app.get("upload_post_api_key", ""),
-                type="password",
-                help=tr("Upload-Post API Key Help").format(
-                    api_keys_url=UPLOAD_POST_API_KEYS_URL
-                ),
-                key="upload_post_api_key_input"
-            )
-            if upload_post_api_key != config.app.get("upload_post_api_key", ""):
-                _set_runtime_config("app", "upload_post_api_key", upload_post_api_key)
-
-            upload_post_username = st.text_input(
-                tr("Upload-Post Profile Username"),
-                value=config.app.get("upload_post_username", ""),
-                help=tr("Upload-Post Profile Username Help").format(
-                    manage_users_url=UPLOAD_POST_MANAGE_USERS_URL
-                ),
-                key="upload_post_username_input"
-            )
-            if upload_post_username != config.app.get("upload_post_username", ""):
-                _set_runtime_config("app", "upload_post_username", upload_post_username)
-
-            upload_post_platforms = st.multiselect(
-                tr("Platforms"),
-                options=["tiktok", "instagram", "youtube"],
-                default=config.app.get("upload_post_platforms", ["tiktok", "instagram"]),
-                help="Select platforms to publish to",
-                key="upload_post_platforms_multiselect"
-            )
-            if upload_post_platforms != config.app.get("upload_post_platforms", ["tiktok", "instagram"]):
-                _set_runtime_config("app", "upload_post_platforms", upload_post_platforms)
-
-            if "youtube" in upload_post_platforms:
-                yt_status_options = ["public", "private", "unlisted"]
-                yt_saved = config.app.get("upload_post_youtube_privacy_status", "public")
-                if yt_saved not in yt_status_options:
-                    yt_saved = "public"
-                upload_post_youtube_privacy_status = st.selectbox(
-                    tr("YouTube Privacy Status"),
-                    options=yt_status_options,
-                    index=yt_status_options.index(yt_saved),
-                    key="upload_post_youtube_privacy_status_selectbox"
-                )
-                if upload_post_youtube_privacy_status != config.app.get("upload_post_youtube_privacy_status", "public"):
-                    _set_runtime_config("app", "upload_post_youtube_privacy_status", upload_post_youtube_privacy_status)
 
         # 左侧面板 - 日志设置
         with left_config_panel:
@@ -3076,14 +3375,12 @@ def _render_settings_dialog():
                 # 选择服务区域，再由 Registry 同步 API 申请入口和 Base URL，
                 # 避免手工组合错误。已有空 Base URL 配置继续沿用中国站，只有
                 # 尚未填写 Key 的全新配置才根据界面语言推荐对应入口。
-                selected_service_endpoint = (
-                    llm_provider_spec.select_service_endpoint(
-                        configured_llm_base_url,
-                        has_api_key=bool(str(llm_api_key).strip()),
-                        prefer_international=(
-                            st.session_state.get("ui_language", "en") != "zh"
-                        ),
-                    )
+                selected_service_endpoint = llm_provider_spec.select_service_endpoint(
+                    configured_llm_base_url,
+                    has_api_key=bool(str(llm_api_key).strip()),
+                    prefer_international=(
+                        st.session_state.get("ui_language", "en") != "zh"
+                    ),
                 )
                 endpoint_options = [
                     endpoint.endpoint_id
@@ -3307,6 +3604,7 @@ def _render_settings_dialog():
 
         # 右侧面板 - API 密钥设置
         with right_config_panel:
+            _render_local_asset_library_settings(right_config_panel)
             # 素材 Provider 按「搜索库存素材 / AI 生成视频 / AI 生成图片」
             # 分组，避免随着 Provider 增多后所有字段在一个长列表中混排。
             # 分组只调整展示层级，不改动已有配置键，旧用户升级后
@@ -3398,8 +3696,7 @@ def _render_settings_dialog():
                     key=lambda value: value != metaso_minimax.DEFAULT_RESOLUTION,
                 )
                 resolution_is_valid = (
-                    configured_metaso_resolution
-                    in metaso_minimax.SUPPORTED_RESOLUTIONS
+                    configured_metaso_resolution in metaso_minimax.SUPPORTED_RESOLUTIONS
                 )
                 if not resolution_is_valid:
                     # 分辨率直接影响计费。手工配置错误时保留原值并要求用户
@@ -3449,9 +3746,7 @@ def _render_settings_dialog():
                         help=tr("Shengsuan Cloud API Key Help"),
                         placeholder=tr("Shengsuan Cloud API Key Placeholder"),
                     ).strip()
-                    _set_runtime_config(
-                        "app", "loomloom_api_token", loomloom_api_token
-                    )
+                    _set_runtime_config("app", "loomloom_api_token", loomloom_api_token)
 
                 st.divider()
                 seedance_api_key_value = str(
@@ -3592,8 +3887,7 @@ def _render_settings_dialog():
                     (tr("OFox Vendor Auto"), ""),
                 ]
                 configured_ofox_vendor = str(
-                    config.app.get("ofox_provider", ofox.DEFAULT_PROVIDER_TYPE)
-                    or ""
+                    config.app.get("ofox_provider", ofox.DEFAULT_PROVIDER_TYPE) or ""
                 ).strip()
                 if configured_ofox_vendor not in {
                     value for _, value in ofox_vendor_options
@@ -3630,9 +3924,7 @@ def _render_settings_dialog():
                     "app", "openai_image_base_url", openai_image_base_url.strip()
                 )
 
-                openai_image_api_key = _get_material_api_keys(
-                    "openai_image_api_keys"
-                )
+                openai_image_api_key = _get_material_api_keys("openai_image_api_keys")
                 openai_image_api_key = st.text_input(
                     tr("OpenAI Image API Key"),
                     value=openai_image_api_key,
@@ -3640,9 +3932,7 @@ def _render_settings_dialog():
                     help=tr("OpenAI Image API Key Help"),
                     key="openai_image_api_keys_input",
                 )
-                _save_material_api_keys(
-                    "openai_image_api_keys", openai_image_api_key
-                )
+                _save_material_api_keys("openai_image_api_keys", openai_image_api_key)
 
                 openai_image_model = st.text_input(
                     tr("OpenAI Image Model"),
@@ -3658,9 +3948,7 @@ def _render_settings_dialog():
                 # 用户在未知情时误连官方付费接口，也不会覆盖旧配置。
                 st.caption(tr("OpenAI Image Configuration Example"))
 
-                with st.expander(
-                    tr("OpenAI Image Advanced Settings"), expanded=False
-                ):
+                with st.expander(tr("OpenAI Image Advanced Settings"), expanded=False):
                     openai_image_size = st.text_input(
                         tr("OpenAI Image Size"),
                         value=str(config.app.get("openai_image_size", "") or ""),
@@ -4085,9 +4373,7 @@ def _render_loomloom_script_generation(params):
         key="loomloom_script_duration_seconds",
     )
     _set_runtime_config("ui", "loomloom_candidate_count", int(candidate_count))
-    _set_runtime_config(
-        "ui", "loomloom_script_duration_seconds", int(duration_seconds)
-    )
+    _set_runtime_config("ui", "loomloom_script_duration_seconds", int(duration_seconds))
     input_signature = _loomloom_script_signature(
         subject=params.video_subject,
         language=params.video_language,
@@ -4436,7 +4722,13 @@ def _render_script_settings(panel, params):
 
 
 def _render_video_settings(panel, params):
-    """渲染视频设置并返回本次选择的本地素材。"""
+    """
+    渲染视频设置并返回本次选择的本地素材。
+
+    @param panel Streamlit 视频设置面板容器。
+    @param params 当前页面正在编辑的 `VideoParams`。
+    @returns 本次页面上传的本地视频文件列表。
+    """
     uploaded_files = []
     with panel:
         with st.container(border=True):
@@ -4497,11 +4789,36 @@ def _render_video_settings(panel, params):
                     accept_multiple_files=True,
                     key="local_video_materials_uploader",
                 )
+                if uploaded_files:
+                    try:
+                        has_library_root = asset_library.configured_video_root() is not None
+                    except asset_library.AssetLibraryError:
+                        has_library_root = False
+                    if has_library_root:
+                        st.checkbox(
+                            tr("Add Uploaded Materials to Library"),
+                            key="local_library_add_uploads",
+                            help=tr("Add Uploaded Materials to Library Help"),
+                        )
+                        st.text_input(
+                            tr("Uploaded Material Library Category"),
+                            key="local_library_upload_category",
+                        )
 
             # 文案顺序匹配会从关键词生成到最终合成全程保持叙事顺序，因此开启时
             # 顺序拼接是唯一符合实际执行逻辑的选项。同步控件值可避免界面仍显示
             # “随机拼接”，同时保留用户原选择，关闭后自动恢复。
             sync_script_order_concat_mode()
+            local_storyboard_active = bool(
+                params.video_source == "local"
+                and st.session_state.get("local_storyboard_selected_ids")
+                and not uploaded_files
+            )
+            if local_storyboard_active:
+                st.session_state[localized_widget_key("video_concat_mode_select")] = (
+                    VideoConcatMode.sequential.value
+                )
+                st.caption(tr("Local Storyboard Order Locked"))
             selected_concat_mode = stable_selectbox(
                 tr("Video Concat Mode"),
                 options=[value for _, value in video_concat_modes],
@@ -4514,7 +4831,10 @@ def _render_video_settings(panel, params):
                 format_func=lambda value: dict(
                     (v, label) for label, v in video_concat_modes
                 )[value],
-                disabled=bool(st.session_state.get("match_materials_to_script", False)),
+                disabled=bool(
+                    st.session_state.get("match_materials_to_script", False)
+                    or local_storyboard_active
+                ),
             )
             params.video_concat_mode = VideoConcatMode(selected_concat_mode)
 
@@ -4617,9 +4937,7 @@ def _render_video_settings(panel, params):
                 help=tr("Video Fit Mode Help"),
             )
             params.video_fit_mode = VideoFitMode(selected_fit_mode)
-            _set_runtime_config(
-                "ui", "video_fit_mode", params.video_fit_mode.value
-            )
+            _set_runtime_config("ui", "video_fit_mode", params.video_fit_mode.value)
 
             # MiniMax H3 的远端时长范围是 4～15 秒。选择秘塔时使用完整能力
             # 范围，既避免 2/3 秒被按 4 秒计费，也让 WebUI 与 CLI、服务层一致。
@@ -4644,9 +4962,8 @@ def _render_video_settings(panel, params):
                 key="video_clip_duration_select",
                 help=tr("Clip Duration Help"),
             )
-            _set_runtime_config(
-                "ui", "video_clip_duration", params.video_clip_duration
-            )
+            _set_runtime_config("ui", "video_clip_duration", params.video_clip_duration)
+            _render_local_library_match(params)
             clip_speed_key = localized_widget_key("video_clip_speed_slider")
             # session_state 可能来自旧任务、API 参数或旧版页面状态。控件创建前
             # 统一归一化，既保留合法选择，也确保 slider 始终收到 0.5～2.0
@@ -4671,9 +4988,7 @@ def _render_video_settings(panel, params):
             params.video_count = stable_selectbox(
                 tr("Number of Videos Generated Simultaneously"),
                 options=video_count_options,
-                default_value=_saved_ui_choice(
-                    "video_count", video_count_options, 1
-                ),
+                default_value=_saved_ui_choice("video_count", video_count_options, 1),
                 key="video_count_select",
             )
             _set_runtime_config("ui", "video_count", params.video_count)
@@ -4745,9 +5060,7 @@ def _render_wavespeed_video_settings(params):
         max_clips = max(
             math.ceil(estimated_range[1] * video_count / clip_duration), min_clips
         )
-        st.warning(
-            tr("WaveSpeed Billing Notice").format(min=min_clips, max=max_clips)
-        )
+        st.warning(tr("WaveSpeed Billing Notice").format(min=min_clips, max=max_clips))
     else:
         st.warning(tr("WaveSpeed Billing Notice Without Script"))
     st.checkbox(
@@ -4795,9 +5108,7 @@ def _render_ofox_video_settings(params):
         max_clips = max(
             math.ceil(estimated_range[1] * video_count / clip_duration), min_clips
         )
-        st.warning(
-            tr("OFox Billing Notice").format(min=min_clips, max=max_clips)
-        )
+        st.warning(tr("OFox Billing Notice").format(min=min_clips, max=max_clips))
     else:
         st.warning(tr("OFox Billing Notice Without Script"))
     st.checkbox(
@@ -5472,6 +5783,11 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
         (tr("Sonilo Background Music"), "sonilo"),
         (tr("ElevenLabs Background Music"), "elevenlabs"),
     ]
+    if params.video_source == "local":
+        bgm_options.insert(
+            3,
+            (tr("Smart Local Background Music"), "smart"),
+        )
     selected_bgm_type = stable_selectbox(
         tr("Background Music Source"),
         options=[value for _, value in bgm_options],
@@ -5621,9 +5937,7 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
             key="custom_bgm_file_input",
             disabled=uploaded_bgm_file is not None,
         )
-        _set_runtime_config(
-            "ui", "custom_bgm_file", custom_bgm_file.strip()
-        )
+        _set_runtime_config("ui", "custom_bgm_file", custom_bgm_file.strip())
         if uploaded_bgm_file is None and custom_bgm_file and bgm_enabled:
             # 文件名由服务层映射到 storage/bgm 或 resource/songs 后校验，
             # UI 不接受两个白名单目录之外的任意路径。
@@ -5692,6 +6006,42 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
             else:
                 params.bgm_file = ""
 
+    if params.bgm_type == "smart":
+        candidates = tuple(st.session_state.get("local_library_bgm_candidates") or ())
+        candidate_by_id = {asset.asset_id: asset for asset in candidates}
+        candidate_ids = list(candidate_by_id)
+        if not candidate_ids:
+            st.warning(tr("No Local BGM Available"))
+            st.session_state["local_library_bgm_id"] = ""
+            params.bgm_file = ""
+        else:
+            saved_id = st.session_state.get("local_library_bgm_id", "")
+            if saved_id not in candidate_by_id:
+                saved_id = candidate_ids[0]
+            selected_id = st.selectbox(
+                tr("Smart Local Background Music Candidate"),
+                options=candidate_ids,
+                index=candidate_ids.index(saved_id),
+                format_func=lambda asset_id: _library_candidate_label(
+                    candidate_by_id[asset_id]
+                ),
+                key="local_library_bgm_select",
+            )
+            st.session_state["local_library_bgm_id"] = selected_id
+            selected_asset = candidate_by_id[selected_id]
+            try:
+                selected_path = asset_library.resolve_asset_path(selected_asset)
+                selected_bytes = selected_path.read_bytes()
+            except (asset_library.AssetLibraryError, OSError) as exc:
+                st.error(f"{tr('Local Asset Unavailable')}: {exc}")
+                params.bgm_file = ""
+            else:
+                st.audio(
+                    selected_bytes,
+                    format=mimetypes.guess_type(selected_asset.name)[0] or "audio/mpeg",
+                )
+                params.bgm_file = ""
+
     if params.bgm_type == "sonilo":
         if previous_bgm_type != "sonilo":
             st.session_state["sonilo_bgm_prompt_input"] = _saved_ui_text(
@@ -5704,9 +6054,7 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
             max_chars=sonilo_service.MAX_PROMPT_LENGTH,
             help=tr("Sonilo Music Prompt Help"),
         ).strip()
-        _set_runtime_config(
-            "ui", "sonilo_bgm_prompt", params.video_music_prompt
-        )
+        _set_runtime_config("ui", "sonilo_bgm_prompt", params.video_music_prompt)
         if params.video_count > 1:
             st.warning(tr("Sonilo Multiple Videos Warning"))
         if st.button(
@@ -5733,9 +6081,7 @@ def _render_background_music_settings(params, elevenlabs_api_key_rendered=False)
             max_chars=elevenlabs_music_service.MAX_PROMPT_LENGTH,
             help=tr("ElevenLabs Music Prompt Help"),
         ).strip()
-        _set_runtime_config(
-            "ui", "elevenlabs_music_prompt", params.video_music_prompt
-        )
+        _set_runtime_config("ui", "elevenlabs_music_prompt", params.video_music_prompt)
         if params.video_count > 1:
             st.warning(tr("ElevenLabs Multiple Videos Warning"))
         if st.button(
@@ -5915,9 +6261,8 @@ def _render_audio_settings(panel, params):
                 if voice.is_fish_audio_voice(v):
                     parts = v.split(":", 2)
                     display_name = parts[2] if len(parts) >= 3 else v
-                    return (
-                        display_name.replace("Female", tr("Female"))
-                        .replace("Male", tr("Male"))
+                    return display_name.replace("Female", tr("Female")).replace(
+                        "Male", tr("Male")
                     )
                 return (
                     v.replace("Female", tr("Female"))
@@ -6109,7 +6454,8 @@ def _render_audio_settings(panel, params):
             ):
                 saved_fish_api_key = (
                     config.fish_audio.get("api_key", "")
-                    if hasattr(config, "fish_audio") and isinstance(config.fish_audio, dict)
+                    if hasattr(config, "fish_audio")
+                    and isinstance(config.fish_audio, dict)
                     else ""
                 )
                 fish_audio_api_key = st.text_input(
@@ -6127,7 +6473,8 @@ def _render_audio_settings(panel, params):
                 ]
                 saved_fish_model = (
                     config.fish_audio.get("model", "s2.1-pro-free")
-                    if hasattr(config, "fish_audio") and isinstance(config.fish_audio, dict)
+                    if hasattr(config, "fish_audio")
+                    and isinstance(config.fish_audio, dict)
                     else "s2.1-pro-free"
                 )
                 if saved_fish_model not in _fish_audio_models:
@@ -6393,9 +6740,7 @@ def _render_subtitle_settings(panel, params):
                 disabled=subtitle_settings_disabled,
             )
             params.subtitle_animation = selected_anim
-            _set_runtime_config(
-                "ui", "subtitle_animation", params.subtitle_animation
-            )
+            _set_runtime_config("ui", "subtitle_animation", params.subtitle_animation)
 
             if params.subtitle_position == "custom":
                 saved_custom_position = config.ui.get(
@@ -6591,8 +6936,692 @@ def _render_subtitle_settings(panel, params):
                 st.toast(tr("Default Subtitle Settings Restored"))
 
 
+def _new_post_process_text_row() -> dict:
+    """创建一条指定文字的默认 UI 行配置。"""
+    return {
+        "id": uuid4().hex,
+        "text": "",
+        "start": 0.0,
+        "end": 3.0,
+        "font_name": DEFAULT_POST_PROCESS_FONT,
+        "font_size_px": 90,
+        "color": "#FF3B30",
+        "stroke_color": "#FFFFFF",
+        "stroke_width_px": 2.0,
+        "x_ratio": 0.5,
+        "y_ratio": 0.15,
+        "animation": "none",
+        "stagger": 0.08,
+        "pop_duration": 0.18,
+        "flicker_duration": 0.4,
+        "flicker_hz": 8.0,
+        "scale_from": 0.6,
+    }
+
+
+def _new_post_process_image_row() -> dict:
+    """创建一条图片图层的默认 UI 行配置。"""
+    return {
+        "id": uuid4().hex,
+        "path": "",
+        "start": 0.0,
+        "end": 3.0,
+        "x_ratio": 0.5,
+        "y_ratio": 0.5,
+        "width_ratio": 0.6,
+        "height_ratio": 0.3,
+        "fit_mode": "contain",
+        "opacity": 1.0,
+    }
+
+
+def _persist_post_process_image(uploaded_file, row_id):
+    """
+    将页面上传的图片图层保存到受控目录，并按行复用同一文件。
+
+    @param uploaded_file Streamlit 上传对象，或 None。
+    @param row_id 图片图层行 ID，用于区分不同行各自的上传缓存。
+    @returns 已保存的绝对路径字符串；没有新上传时返回该行已有路径。
+    @raises ValueError 上传扩展名或保存路径不合法。
+    """
+    path_key = f"post_process_image_path_{row_id}"
+    signature_key = f"post_process_image_signature_{row_id}"
+    existing_path = st.session_state.get(path_key, "")
+    if uploaded_file is None:
+        return existing_path
+    content = uploaded_file.getvalue()
+    signature = hashlib.sha256(content).hexdigest()
+    if (
+        signature == st.session_state.get(signature_key)
+        and existing_path
+        and os.path.isfile(existing_path)
+    ):
+        return existing_path
+    target_dir = utils.storage_dir(POST_PROCESS_IMAGE_DIR, create=True)
+    image_path = _build_uploaded_file_path(
+        uploaded_file,
+        target_dir,
+        POST_PROCESS_LOGO_EXTENSIONS,
+        "image",
+    )
+    with open(image_path, "wb") as file:
+        file.write(content)
+    st.session_state[path_key] = image_path
+    st.session_state[signature_key] = signature
+    return image_path
+
+
+def _persist_post_process_logo(uploaded_file):
+    """
+    将页面上传的 Logo 保存到受控目录并复用同一会话中的同一文件。
+
+    @param uploaded_file Streamlit 上传对象，或 None。
+    @returns 已保存的绝对路径字符串；没有新上传时返回会话中已有路径。
+    @raises ValueError 上传扩展名或保存路径不合法。
+    """
+    existing_path = st.session_state.get("post_process_logo_path", "")
+    if uploaded_file is None:
+        return existing_path
+    content = uploaded_file.getvalue()
+    signature = hashlib.sha256(content).hexdigest()
+    if (
+        signature == st.session_state.get("post_process_logo_signature")
+        and existing_path
+        and os.path.isfile(existing_path)
+    ):
+        return existing_path
+    target_dir = utils.storage_dir(POST_PROCESS_LOGO_DIR, create=True)
+    logo_path = _build_uploaded_file_path(
+        uploaded_file,
+        target_dir,
+        POST_PROCESS_LOGO_EXTENSIONS,
+        "logo",
+    )
+    with open(logo_path, "wb") as file:
+        file.write(content)
+    st.session_state["post_process_logo_path"] = logo_path
+    st.session_state["post_process_logo_signature"] = signature
+    return logo_path
+
+
+def _render_post_process_settings() -> dict:
+    """
+    渲染广告后处理设置并返回本次页面的不可变配置快照。
+
+    @returns 包含启用状态、输出 profile、水印设置和指定文字列表的字典。
+    """
+    with st.container():
+        enabled = st.checkbox(
+            tr("Enable Advertising Post-processing"),
+            key="post_process_enabled_checkbox",
+            help=tr("Advertising Post-processing Help"),
+        )
+        profile_options = list(BUILTIN_PROFILES)
+        profile_labels = {
+            "portrait-1080x1920": tr("Advertising Profile Portrait"),
+            "landscape-1920x1080": tr("Advertising Profile Landscape"),
+            "square-1080": tr("Advertising Profile Square"),
+            "portrait-test-v1": tr("Advertising Profile Portrait Test"),
+        }
+        profile_display_options = [
+            profile_labels.get(value, value) for value in profile_options
+        ]
+        profile_display_to_id = dict(zip(profile_display_options, profile_options))
+        saved_profile_id = st.session_state.get(
+            "post_process_profile_id", "portrait-1080x1920"
+        )
+        saved_profile_label = profile_labels.get(
+            saved_profile_id, profile_display_options[0]
+        )
+        selected_profile_label = stable_selectbox(
+            tr("Advertising Output Profile"),
+            options=profile_display_options,
+            default_value=saved_profile_label,
+            key="post_process_profile_select",
+            disabled=not enabled,
+            help=tr("Advertising Output Profile Help"),
+        )
+        profile_id = profile_display_to_id[selected_profile_label]
+        st.session_state["post_process_profile_id"] = profile_id
+        _set_runtime_config("ui", "post_process_profile_id", profile_id)
+
+        watermark_enabled = st.checkbox(
+            tr("Enable Logo Watermark"),
+            key="post_process_watermark_enabled_checkbox",
+            disabled=not enabled,
+        )
+        watermark_cols = st.columns(2)
+        with watermark_cols[0]:
+            uploaded_logo = st.file_uploader(
+                tr("Upload Logo"),
+                type=sorted(
+                    extension.removeprefix(".")
+                    for extension in POST_PROCESS_LOGO_EXTENSIONS
+                ),
+                accept_multiple_files=False,
+                key="post_process_logo_uploader",
+                disabled=not enabled or not watermark_enabled,
+                help=tr("Upload Logo Help"),
+            )
+            logo_path = ""
+            if uploaded_logo is not None:
+                try:
+                    logo_path = _persist_post_process_logo(uploaded_logo)
+                except ValueError as exc:
+                    st.error(f"{tr('Invalid Logo')}: {exc}")
+            else:
+                logo_path = st.session_state.get("post_process_logo_path", "")
+            if logo_path and os.path.isfile(logo_path):
+                st.caption(f"{tr('Selected Logo')}: {os.path.basename(logo_path)}")
+        with watermark_cols[1]:
+            position_options = [
+                "top_left",
+                "top_right",
+                "bottom_left",
+                "bottom_right",
+                "custom",
+            ]
+            position_labels = {
+                "top_left": tr("Watermark Top Left"),
+                "top_right": tr("Watermark Top Right"),
+                "bottom_left": tr("Watermark Bottom Left"),
+                "bottom_right": tr("Watermark Bottom Right"),
+                "custom": tr("Watermark Custom"),
+            }
+            position_display_options = [
+                position_labels[value] for value in position_options
+            ]
+            position_display_to_id = dict(
+                zip(position_display_options, position_options)
+            )
+            saved_position = st.session_state.get(
+                "post_process_watermark_position", "top_right"
+            )
+            selected_position_label = stable_selectbox(
+                tr("Watermark Position"),
+                options=position_display_options,
+                default_value=position_labels.get(
+                    saved_position, position_display_options[1]
+                ),
+                key="post_process_watermark_position_select",
+                disabled=not enabled or not watermark_enabled,
+            )
+            position = position_display_to_id[selected_position_label]
+            st.session_state["post_process_watermark_position"] = position
+        if position == "custom":
+            custom_cols = st.columns(2)
+            custom_x = custom_cols[0].number_input(
+                tr("Watermark X Ratio"),
+                min_value=0.0,
+                max_value=1.0,
+                step=POST_PROCESS_RATIO_STEP,
+                key="post_process_watermark_x_ratio",
+                disabled=not enabled or not watermark_enabled,
+            )
+            custom_y = custom_cols[1].number_input(
+                tr("Watermark Y Ratio"),
+                min_value=0.0,
+                max_value=1.0,
+                step=POST_PROCESS_RATIO_STEP,
+                key="post_process_watermark_y_ratio",
+                disabled=not enabled or not watermark_enabled,
+            )
+            custom_xy_ratio = [custom_x, custom_y]
+        else:
+            custom_xy_ratio = None
+        watermark_cols = st.columns(3)
+        margin_px = watermark_cols[0].number_input(
+            tr("Watermark Margin"),
+            min_value=0,
+            step=1,
+            key="post_process_watermark_margin",
+            disabled=not enabled or not watermark_enabled,
+        )
+        opacity = watermark_cols[1].slider(
+            tr("Watermark Opacity"),
+            min_value=0.0,
+            max_value=1.0,
+            step=POST_PROCESS_OPACITY_STEP,
+            key="post_process_watermark_opacity",
+            disabled=not enabled or not watermark_enabled,
+        )
+        height_ratio = watermark_cols[2].slider(
+            tr("Watermark Size"),
+            min_value=POST_PROCESS_HEIGHT_RATIO_MIN,
+            max_value=POST_PROCESS_HEIGHT_RATIO_MAX,
+            step=POST_PROCESS_HEIGHT_RATIO_STEP,
+            key="post_process_watermark_height_ratio",
+            disabled=not enabled or not watermark_enabled,
+        )
+        trim_transparent = st.checkbox(
+            tr("Trim Transparent Logo Border"),
+            value=True,
+            key="post_process_trim_transparent",
+            disabled=not enabled or not watermark_enabled,
+            help=tr("Trim Transparent Logo Border Help"),
+        )
+
+        rows = list(st.session_state.get("post_process_text_rows", []))
+        if st.button(
+            tr("Add Specified Text"),
+            key="post_process_add_text",
+            disabled=not enabled,
+            icon=":material/add:",
+        ):
+            rows.append(_new_post_process_text_row())
+            st.session_state["post_process_text_rows"] = rows
+            st.rerun(scope="app")
+        font_options = get_all_fonts()
+        rendered_rows = []
+        for index, row in enumerate(rows):
+            row_id = row.get("id") or uuid4().hex
+            updated = dict(row)
+            with st.container(border=True):
+                st.markdown(f"**{tr('Specified Text')} {index + 1}**")
+                text_cols = st.columns([0.5, 0.2, 0.2, 0.1])
+                updated["text"] = text_cols[0].text_input(
+                    tr("Specified Text Content"),
+                    value=str(row.get("text", "")),
+                    key=f"post_text_content_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["start"] = text_cols[1].number_input(
+                    tr("Text Start"),
+                    min_value=0.0,
+                    value=float(row.get("start", 0.0)),
+                    step=0.1,
+                    key=f"post_text_start_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["end"] = text_cols[2].number_input(
+                    tr("Text End"),
+                    min_value=0.0,
+                    value=float(row.get("end", 3.0)),
+                    step=0.1,
+                    key=f"post_text_end_{row_id}",
+                    disabled=not enabled,
+                )
+                if text_cols[3].button(
+                    "✕", key=f"post_text_remove_{row_id}", disabled=not enabled
+                ):
+                    st.session_state["post_process_text_rows"] = [
+                        item for item in rows if item.get("id") != row_id
+                    ]
+                    st.rerun(scope="app")
+                st.caption(tr("Specified Text Style"))
+                style_cols = st.columns(4)
+                default_font = row.get("font_name") or (
+                    DEFAULT_POST_PROCESS_FONT
+                    if DEFAULT_POST_PROCESS_FONT in font_options
+                    else (font_options[0] if font_options else "")
+                )
+                updated["font_name"] = stable_selectbox(
+                    tr("Text Font"),
+                    options=font_options or [default_font],
+                    default_value=default_font,
+                    key=f"post_text_font_{row_id}",
+                    disabled=not enabled,
+                )
+                if updated["text"].strip() and updated["font_name"]:
+                    selected_text_font_path = os.path.join(
+                        font_dir, updated["font_name"]
+                    )
+                    if not video.subtitle_font_supports_text(
+                        selected_text_font_path, updated["text"]
+                    ):
+                        st.warning(tr("Specified Text Font Does Not Support Text"))
+                updated["font_size_px"] = style_cols[1].number_input(
+                    tr("Text Font Size"),
+                    min_value=1,
+                    value=int(row.get("font_size_px", 90)),
+                    step=1,
+                    key=f"post_text_size_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["color"] = style_cols[2].color_picker(
+                    tr("Text Color"),
+                    value=row.get("color", "#FF3B30"),
+                    key=f"post_text_color_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["stroke_color"] = style_cols[3].color_picker(
+                    tr("Text Stroke Color"),
+                    value=row.get("stroke_color", "#FFFFFF"),
+                    key=f"post_text_stroke_color_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["stroke_width_px"] = st.number_input(
+                    tr("Text Stroke Width"),
+                    min_value=0.0,
+                    value=float(row.get("stroke_width_px", 2.0)),
+                    step=0.5,
+                    key=f"post_text_stroke_width_{row_id}",
+                    disabled=not enabled,
+                )
+                st.caption(tr("Specified Text Layout and Animation"))
+                animation_values = [
+                    "none",
+                    "pop_spring",
+                    "letter_by_letter",
+                    "flicker_scale",
+                ]
+                animation_labels = {
+                    "none": tr("None"),
+                    "pop_spring": tr("Text Pop Spring"),
+                    "letter_by_letter": tr("Text Letter by Letter"),
+                    "flicker_scale": tr("Text Flicker Scale"),
+                }
+                animation_display_options = [
+                    animation_labels[value] for value in animation_values
+                ]
+                animation_display_to_id = dict(
+                    zip(animation_display_options, animation_values)
+                )
+                selected_animation_label = stable_selectbox(
+                    tr("Text Animation"),
+                    options=animation_display_options,
+                    default_value=animation_labels.get(
+                        row.get("animation", "none"), animation_display_options[0]
+                    ),
+                    key=f"post_text_animation_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["animation"] = animation_display_to_id[selected_animation_label]
+                position_cols = st.columns(2)
+                updated["x_ratio"] = position_cols[0].slider(
+                    tr("Text X Ratio"),
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=float(row.get("x_ratio", 0.5)),
+                    step=POST_PROCESS_RATIO_STEP,
+                    key=f"post_text_x_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["y_ratio"] = position_cols[1].slider(
+                    tr("Text Y Ratio"),
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=float(row.get("y_ratio", 0.15)),
+                    step=POST_PROCESS_RATIO_STEP,
+                    key=f"post_text_y_{row_id}",
+                    disabled=not enabled,
+                )
+                parameter_cols = st.columns(4)
+                updated["stagger"] = parameter_cols[0].number_input(
+                    tr("Text Stagger"),
+                    min_value=0.0,
+                    value=float(row.get("stagger", 0.08)),
+                    step=0.01,
+                    key=f"post_text_stagger_{row_id}",
+                    disabled=not enabled or updated["animation"] != "letter_by_letter",
+                )
+                updated["pop_duration"] = parameter_cols[1].number_input(
+                    tr("Text Pop Duration"),
+                    min_value=0.01,
+                    value=float(row.get("pop_duration", 0.18)),
+                    step=0.01,
+                    key=f"post_text_pop_duration_{row_id}",
+                    disabled=not enabled
+                    or updated["animation"] not in {"pop_spring", "letter_by_letter"},
+                )
+                updated["flicker_duration"] = parameter_cols[2].number_input(
+                    tr("Text Flicker Duration"),
+                    min_value=0.01,
+                    value=float(row.get("flicker_duration", 0.4)),
+                    step=0.01,
+                    key=f"post_text_flicker_duration_{row_id}",
+                    disabled=not enabled or updated["animation"] != "flicker_scale",
+                )
+                updated["flicker_hz"] = parameter_cols[3].number_input(
+                    tr("Text Flicker Frequency"),
+                    min_value=0.01,
+                    value=float(row.get("flicker_hz", 8.0)),
+                    step=0.5,
+                    key=f"post_text_flicker_hz_{row_id}",
+                    disabled=not enabled or updated["animation"] != "flicker_scale",
+                )
+                updated["scale_from"] = st.slider(
+                    tr("Text Initial Scale"),
+                    min_value=0.05,
+                    max_value=1.0,
+                    value=float(row.get("scale_from", 0.6)),
+                    step=0.05,
+                    key=f"post_text_scale_from_{row_id}",
+                    disabled=not enabled
+                    or updated["animation"]
+                    not in {"pop_spring", "flicker_scale", "letter_by_letter"},
+                )
+            updated["id"] = row_id
+            rendered_rows.append(updated)
+        st.session_state["post_process_text_rows"] = rendered_rows
+
+        image_rows = list(st.session_state.get("post_process_image_rows", []))
+        if st.button(
+            tr("Add Image Layer"),
+            key="post_process_add_image",
+            disabled=not enabled,
+            icon=":material/add:",
+        ):
+            image_rows.append(_new_post_process_image_row())
+            st.session_state["post_process_image_rows"] = image_rows
+            st.rerun(scope="app")
+        image_fit_labels = {
+            "contain": tr("Image Fit Contain"),
+            "cover": tr("Image Fit Cover"),
+        }
+        rendered_image_rows = []
+        for index, row in enumerate(image_rows):
+            row_id = row.get("id") or uuid4().hex
+            updated = dict(row)
+            with st.container(border=True):
+                header_cols = st.columns([0.9, 0.1])
+                header_cols[0].markdown(f"**{tr('Image Layer')} {index + 1}**")
+                if header_cols[1].button(
+                    "✕", key=f"post_image_remove_{row_id}", disabled=not enabled
+                ):
+                    st.session_state["post_process_image_rows"] = [
+                        item for item in image_rows if item.get("id") != row_id
+                    ]
+                    st.rerun(scope="app")
+                uploaded_image = st.file_uploader(
+                    tr("Upload Image Layer"),
+                    type=sorted(
+                        extension.removeprefix(".")
+                        for extension in POST_PROCESS_LOGO_EXTENSIONS
+                    ),
+                    accept_multiple_files=False,
+                    key=f"post_image_uploader_{row_id}",
+                    disabled=not enabled,
+                )
+                try:
+                    updated["path"] = _persist_post_process_image(
+                        uploaded_image, row_id
+                    )
+                except ValueError as exc:
+                    st.error(f"{tr('Invalid Image Layer')}: {exc}")
+                    updated["path"] = ""
+                if updated["path"] and os.path.isfile(updated["path"]):
+                    st.caption(
+                        f"{tr('Selected Image Layer')}: "
+                        f"{os.path.basename(updated['path'])}"
+                    )
+                time_cols = st.columns(3)
+                updated["start"] = time_cols[0].number_input(
+                    tr("Text Start"),
+                    min_value=0.0,
+                    value=float(row.get("start", 0.0)),
+                    step=0.1,
+                    key=f"post_image_start_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["end"] = time_cols[1].number_input(
+                    tr("Text End"),
+                    min_value=0.0,
+                    value=float(row.get("end", 3.0)),
+                    step=0.1,
+                    key=f"post_image_end_{row_id}",
+                    disabled=not enabled,
+                )
+                with time_cols[2]:
+                    updated["fit_mode"] = stable_selectbox(
+                        tr("Image Fit Mode"),
+                        options=["contain", "cover"],
+                        default_value=str(row.get("fit_mode", "contain")),
+                        key=f"post_image_fit_{row_id}",
+                        format_func=lambda value: image_fit_labels[value],
+                        disabled=not enabled,
+                    )
+                ratio_cols = st.columns(4)
+                updated["x_ratio"] = ratio_cols[0].slider(
+                    tr("Image X Ratio"),
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=float(row.get("x_ratio", 0.5)),
+                    step=POST_PROCESS_RATIO_STEP,
+                    key=f"post_image_x_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["y_ratio"] = ratio_cols[1].slider(
+                    tr("Image Y Ratio"),
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=float(row.get("y_ratio", 0.5)),
+                    step=POST_PROCESS_RATIO_STEP,
+                    key=f"post_image_y_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["width_ratio"] = ratio_cols[2].slider(
+                    tr("Image Width Ratio"),
+                    min_value=POST_PROCESS_RATIO_STEP,
+                    max_value=1.0,
+                    value=float(row.get("width_ratio", 0.6)),
+                    step=POST_PROCESS_RATIO_STEP,
+                    key=f"post_image_width_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["height_ratio"] = ratio_cols[3].slider(
+                    tr("Image Height Ratio"),
+                    min_value=POST_PROCESS_RATIO_STEP,
+                    max_value=1.0,
+                    value=float(row.get("height_ratio", 0.3)),
+                    step=POST_PROCESS_RATIO_STEP,
+                    key=f"post_image_height_{row_id}",
+                    disabled=not enabled,
+                )
+                updated["opacity"] = st.slider(
+                    tr("Image Opacity"),
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=float(row.get("opacity", 1.0)),
+                    step=POST_PROCESS_OPACITY_STEP,
+                    key=f"post_image_opacity_{row_id}",
+                    disabled=not enabled,
+                )
+            updated["id"] = row_id
+            rendered_image_rows.append(updated)
+        st.session_state["post_process_image_rows"] = rendered_image_rows
+
+    return {
+        "enabled": enabled,
+        "profile_id": profile_id,
+        "watermark": {
+            "enabled": watermark_enabled,
+            "logo_path": logo_path,
+            "trim_transparent": trim_transparent,
+            "position": position,
+            "custom_xy_ratio": custom_xy_ratio,
+            "margin_px": margin_px,
+            "opacity": opacity,
+            "height_ratio": height_ratio,
+        },
+        "custom_texts": [
+            {key: value for key, value in row.items() if key != "id"}
+            for row in rendered_rows
+            if str(row.get("text", "")).strip()
+        ],
+        "image_layers": [
+            {key: value for key, value in row.items() if key != "id"}
+            for row in rendered_image_rows
+            if str(row.get("path", "")).strip()
+        ],
+    }
+
+
+def _dismiss_post_process_dialog():
+    """关闭广告图层弹窗；最近一次配置快照保留在会话中，供生成流程继续读取。"""
+    st.session_state["post_process_dialog_open"] = False
+
+
+@st.dialog(
+    tr("Advertising Post-processing"),
+    width="large",
+    on_dismiss=_dismiss_post_process_dialog,
+)
+def _render_post_process_dialog():
+    """在宽弹窗中渲染广告图层控件，避免字幕列放不下 Logo 和多条指定文字。"""
+    st.session_state["post_process_settings_snapshot"] = _render_post_process_settings()
+
+
+def _post_process_settings_snapshot() -> dict:
+    """
+    返回最近一次广告图层弹窗产生的配置快照。
+
+    @returns 配置字典；从未打开过弹窗时表示本次任务不叠加广告图层。
+    """
+    snapshot = st.session_state.get("post_process_settings_snapshot")
+    if isinstance(snapshot, dict):
+        return snapshot
+    return {"enabled": False, "custom_texts": []}
+
+
+def _save_task_post_process_spec(task_id: str, settings: Mapping) -> str | None:
+    """
+    将页面后处理设置冻结到任务目录，供后台回调读取。
+
+    @param task_id 新任务 ID。
+    @param settings `_render_post_process_settings` 返回的设置快照。
+    @returns spec 文件绝对路径；未启用后处理时返回 None。
+    @raises WebUIAdapterError 设置或资源路径不合法。
+    """
+    if not settings.get("enabled"):
+        return None
+    try:
+        for text in settings.get("custom_texts", []):
+            font_name = str(text.get("font_name", "") or "")
+            content = str(text.get("text", "") or "")
+            if (
+                font_name
+                and content
+                and not video.subtitle_font_supports_text(
+                    os.path.join(font_dir, font_name), content
+                )
+            ):
+                raise WebUIAdapterError(
+                    f"{font_name} does not support characters in the specified text"
+                )
+        spec = build_webui_spec(
+            profile_id=settings["profile_id"],
+            watermark=settings["watermark"],
+            custom_texts=settings.get("custom_texts", []),
+            image_layers=settings.get("image_layers", []),
+            project_root=Path(root_dir),
+        )
+        spec_path = Path(utils.task_dir(task_id)) / "post_process_specs" / "1.json"
+        save_webui_spec(spec_path, spec)
+        return str(spec_path)
+    except WebUIAdapterError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise WebUIAdapterError(f"invalid post-processing settings: {exc}") from exc
+
+
 def _render_generation_controls(
-    params, uploaded_files, uploaded_audio_file, uploaded_bgm_file, voice_mode
+    params,
+    uploaded_files,
+    uploaded_audio_file,
+    uploaded_bgm_file,
+    voice_mode,
+    post_process_settings=None,
 ):
     """
     校验生成依赖、提交任务，并渲染日志与成片结果。
@@ -6605,7 +7634,9 @@ def _render_generation_controls(
         "task_restore_upload_requirements", {}
     )
     has_local_materials = bool(
-        uploaded_files or st.session_state.get("local_video_materials", [])
+        uploaded_files
+        or st.session_state.get("local_video_materials", [])
+        or st.session_state.get("local_storyboard_selected_ids", {})
     )
     has_custom_audio = bool(uploaded_audio_file)
     unmet_restore_requirements = _get_unmet_restore_upload_requirements(
@@ -6729,9 +7760,7 @@ def _render_generation_controls(
             st.stop()
 
         if params.video_source == "metaso_minimax" and not (
-            metaso_minimax.is_enabled(
-                config.snapshot_config_with_pending(config.app)
-            )
+            metaso_minimax.is_enabled(config.snapshot_config_with_pending(config.app))
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Metaso MiniMax API Key"))
@@ -6744,8 +7773,11 @@ def _render_generation_controls(
             st.error(tr("Confirm Metaso MiniMax Charge Required"))
             st.stop()
 
-        if params.video_source == "openai_image" and not material.is_openai_image_enabled(
-            config.snapshot_config_with_pending(config.app)
+        if (
+            params.video_source == "openai_image"
+            and not material.is_openai_image_enabled(
+                config.snapshot_config_with_pending(config.app)
+            )
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Configure the OpenAI Image Source"))
@@ -6853,6 +7885,27 @@ def _render_generation_controls(
             # 持久化到 storage。用户之后调高音量时可直接再次点击生成完成保存。
             params.bgm_file = ""
 
+        if params.bgm_type == "smart" and bgm_service.should_use_bgm(
+            params.bgm_type, params.bgm_volume
+        ):
+            selected_bgm_id = str(
+                st.session_state.get("local_library_bgm_id", "") or ""
+            ).strip()
+            if not selected_bgm_id:
+                _remove_active_generation_task(task_id)
+                st.error(tr("Please Select Local Background Music"))
+                st.stop()
+            try:
+                params.bgm_file = asset_library_runtime.materialize_bgm(selected_bgm_id)
+            except asset_library.AssetLibraryError as exc:
+                _remove_active_generation_task(task_id)
+                logger.error(f"failed to prepare local library BGM: {exc}")
+                st.error(f"{tr('Local BGM Preparation Failed')}: {exc}")
+                st.stop()
+            params.local_bgm_asset_id = selected_bgm_id
+        else:
+            params.local_bgm_asset_id = None
+
         if uploaded_audio_file:
             task_dir = utils.task_dir(task_id)
             try:
@@ -6871,10 +7924,12 @@ def _render_generation_controls(
             params.custom_audio_file = custom_audio_path
 
         if uploaded_files:
+            params.local_storyboard_plan = None
             local_videos_dir = utils.storage_dir("local_videos", create=True)
             # 每次重新上传时都以本次选择的素材为准，避免旧素材不断重复追加。
             params.video_materials = []
             persisted_local_materials = []
+            imported_to_library = False
             for file in uploaded_files:
                 try:
                     file_path = _build_uploaded_file_path(
@@ -6893,18 +7948,71 @@ def _render_generation_controls(
                     m.provider = "local"
                     m.url = file_path
                     params.video_materials.append(m)
-                    persisted_local_materials.append(
-                        {
-                            "provider": m.provider,
-                            "url": m.url,
-                            "duration": m.duration,
-                        }
-                    )
+                persisted_local_materials.append(
+                    {
+                        "provider": m.provider,
+                        "url": m.url,
+                        "duration": m.duration,
+                    }
+                )
+                if st.session_state.get("local_library_add_uploads", False):
+                    try:
+                        asset_library_import.import_video_file(
+                            file_path,
+                            file.name,
+                            st.session_state.get(
+                                "local_library_upload_category", "上传导入"
+                            ),
+                        )
+                        imported_to_library = True
+                    except asset_library.AssetLibraryError as exc:
+                        _remove_active_generation_task(task_id)
+                        st.error(f"{tr('Local Material Import Failed')}: {exc}")
+                        st.stop()
+            if imported_to_library:
+                st.session_state["local_library_scan_signature"] = ""
+                st.session_state["local_storyboard_signature"] = ""
+                st.session_state["local_storyboard_match"] = None
             # 将已上传并保存到本地的视频素材写入会话，供后续只改文案时直接复用。
             st.session_state["local_video_materials"] = persisted_local_materials
         elif (
+            params.video_source == "local"
+            and st.session_state.get("local_storyboard_selected_ids")
+        ):
+            try:
+                selected_mapping = dict(
+                    st.session_state["local_storyboard_selected_ids"]
+                )
+                match = st.session_state.get("local_storyboard_match")
+                if match is None:
+                    raise asset_library.AssetLibraryError(
+                        "storyboard match snapshot is unavailable"
+                    )
+                params.local_storyboard_plan = list(
+                    asset_matching.build_storyboard_plan(match, selected_mapping)
+                )
+                selected_ids = tuple(
+                    item["asset_id"] for item in params.local_storyboard_plan
+                )
+                params.video_materials = list(
+                    asset_matching.material_infos_for_ids(selected_ids)
+                )
+            except asset_library.AssetLibraryError as exc:
+                _remove_active_generation_task(task_id)
+                st.error(f"{tr('Local Storyboard Match Failed')}: {exc}")
+                st.stop()
+            st.session_state["local_video_materials"] = [
+                {
+                    "provider": material.provider,
+                    "url": material.url,
+                    "duration": material.duration,
+                }
+                for material in params.video_materials
+            ]
+        elif (
             params.video_source == "local" and st.session_state["local_video_materials"]
         ):
+            params.local_storyboard_plan = None
             # 当用户没有重新上传文件时，复用最近一次已经保存到磁盘的本地素材列表。
             params.video_materials = []
             for material_entry in st.session_state["local_video_materials"]:
@@ -6935,6 +8043,18 @@ def _render_generation_controls(
                 f"task_id={task_id}, duration={reusable_voice_preview['duration']:.2f}s"
             )
 
+        post_process_spec_path = None
+        if post_process_settings and post_process_settings.get("enabled"):
+            try:
+                post_process_spec_path = _save_task_post_process_spec(
+                    task_id,
+                    post_process_settings,
+                )
+            except WebUIAdapterError as exc:
+                _remove_active_generation_task(task_id)
+                st.error(f"{tr('Invalid Advertising Post-processing')}: {exc}")
+                st.stop()
+
         try:
             st.toast(tr("Generating Video"))
             logger.info(tr("Start Generating Video"))
@@ -6945,6 +8065,12 @@ def _render_generation_controls(
                 capture_logs=not config.ui.get("hide_log", False),
                 voice_preview=reusable_voice_preview,
                 loomloom_video_request=loomloom_video_request,
+                post_process_spec_path=post_process_spec_path,
+                post_process_output_root=os.path.join(
+                    utils.task_dir(task_id), POST_PROCESS_OUTPUT_DIR
+                )
+                if post_process_spec_path
+                else None,
             )
             if loomloom_video_request is not None:
                 # 一个报价只允许提交一次。后台请求自带稳定幂等 ID；提交成功后
@@ -7001,7 +8127,19 @@ def _render_application():
         audio_panel, params
     )
 
+    # 广告图层条目较多，字幕列只放入口按钮，实际编辑在宽弹窗里完成。
     _render_subtitle_settings(right_panel, params)
+    with right_panel:
+        if st.button(
+            tr("Advertising Post-processing"),
+            key="post_process_open_dialog",
+            use_container_width=True,
+            help=tr("Advertising Post-processing Help"),
+        ):
+            st.session_state["post_process_dialog_open"] = True
+    if st.session_state.get("post_process_dialog_open", False):
+        _render_post_process_dialog()
+    post_process_settings = _post_process_settings_snapshot()
 
     generation_submitted = _render_generation_controls(
         params,
@@ -7009,6 +8147,7 @@ def _render_application():
         uploaded_audio_file,
         uploaded_bgm_file,
         voice_mode,
+        post_process_settings,
     )
 
     # 生成分支在启动后台线程前已经请求过保存。普通控件交互继续请求非阻塞保存；

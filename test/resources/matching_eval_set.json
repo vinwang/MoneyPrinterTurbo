@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "notes": "人工标注的本地匹配评测集。2026-09-14 按画面重标：此前的标注依据是镜头检测前的文件级描述，那些描述由整条视频抽 3 帧汇总而来，存在与画面不符的内容（例如 video-dc27786ae098c1e4 被描述成『真空包装摆拍』，实际画面只有两根玉米）。现在每条期望都对照 scripts/review_sheets.py 渲染的逐窗口接触表确认过。asset_id 含内容哈希，素材重新编码后 ID 会变，届时 run_eval 会显式报 stale 并要求重新标注。",
+  "cases": [
+    {
+      "case_id": "long-clause-no-punctuation",
+      "labels": ["长句", "无自然边界"],
+      "script": "这款东北糯玉米从田间采摘之后就立刻真空包装锁住新鲜所以颗粒依然饱满多汁。",
+      "clip_duration": 3,
+      "query_context": "东北糯玉米",
+      "expectations": [
+        {
+          "text_contains": "真空包装",
+          "acceptable_asset_ids": [
+            "video-dd06a0d8feb2f218",
+            "video-20d1645c2c693613",
+            "video-0771136ddcc65a8f",
+            "video-06a781fc4b1492af"
+          ],
+          "forbidden_asset_ids": ["video-9ac4b2f6d893c10e"],
+          "note": "画面核实：dd06a0d8 的 14.1-19.0s 有金色锡纸包装且字幕写『现场采摘极速锁鲜发货的』；20d1645c 的 18.1-22.7s 是真空透明袋；0771136d 的 14.4-19.2s 是整盘真空包装；06a781fc 的 3.4-6.8s 是金色反光包装纸。dc27786a 此前被误标为可接受，它的两个窗口只有两根玉米特写，无任何包装或田间画面。"
+        }
+      ]
+    },
+    {
+      "case_id": "synonym-texture",
+      "labels": ["同义表达"],
+      "script": "皮薄粒满，软糯香甜。掰开来看，颗粒晶莹。",
+      "clip_duration": 3,
+      "query_context": "东北糯玉米",
+      "expectations": [
+        {
+          "text_contains": "皮薄粒满",
+          "acceptable_asset_ids": [
+            "video-dc27786ae098c1e4",
+            "video-06a781fc4b1492af",
+            "video-cf6cd3d56a0709ba",
+            "video-20d1645c2c693613"
+          ],
+          "forbidden_asset_ids": ["video-9ac4b2f6d893c10e"],
+          "note": "画面核实：颗粒饱满的整根玉米特写。dc27786a 两个窗口都是颗粒紧密的玉米特写，正是这句的合适画面——它在上一个用例里不合适，在这里合适。"
+        },
+        {
+          "text_contains": "颗粒晶莹",
+          "acceptable_asset_ids": [
+            "video-cf6cd3d56a0709ba",
+            "video-0771136ddcc65a8f",
+            "video-dd06a0d8feb2f218",
+            "video-7afb46e08be31841"
+          ],
+          "note": "画面核实：cf6cd3d5 的 3.5-8.4s 是双手掰开玉米；0771136d 的 9.6-14.4s 是撕开拉丝；dd06a0d8 的 35.3-40.2s 纵向掰开露出玉米芯；7afb46e0 的 12.7-17.1s 掰成两段。"
+        }
+      ]
+    },
+    {
+      "case_id": "mixed-language-packaging",
+      "labels": ["中英文混排"],
+      "script": "东北糯玉米，vacuum packed，一箱10根。现在下单立减。",
+      "clip_duration": 3,
+      "query_context": "东北糯玉米 真空包装",
+      "expectations": [
+        {
+          "text_contains": "vacuum packed",
+          "acceptable_asset_ids": [
+            "video-20d1645c2c693613",
+            "video-0771136ddcc65a8f",
+            "video-dd06a0d8feb2f218"
+          ],
+          "note": "英文 vacuum packed 与中文『真空包装』同义；当前是词面匹配，预期打不中，这正是第 4 项向量召回要解决的缺口。三条素材都有画面核实过的真空/锁鲜包装窗口。"
+        },
+        {
+          "text_contains": "现在下单立减",
+          "acceptable_asset_ids": [
+            "video-dd06a0d8feb2f218",
+            "video-7afb46e08be31841"
+          ],
+          "note": "画面核实：dd06a0d8 的 53.2-57.3s 与 57.3-61.4s 是购物车和结算页截图；7afb46e0 全程有『¥3.9起/10根』与优惠券引导。"
+        }
+      ]
+    },
+    {
+      "case_id": "abstract-mood",
+      "labels": ["抽象情绪"],
+      "script": "忙碌了一整天，也该好好对自己好一点。这份甜，是给自己的奖励。",
+      "clip_duration": 3,
+      "query_context": "东北糯玉米 健康轻食",
+      "expectations": [
+        {
+          "text_contains": "忙碌了一整天",
+          "acceptable_asset_ids": [
+            "video-b579dac9cae75adc",
+            "video-0771136ddcc65a8f",
+            "video-20d1645c2c693613",
+            "video-7afb46e08be31841"
+          ],
+          "forbidden_asset_ids": ["video-dd06a0d8feb2f218"],
+          "note": "画面核实：b579dac9 的 11.6-15.5s 是母子在沙发上吃玉米、15.5-18.7s 是女子在餐桌前吃——真实的居家享受画面，此前因整条描述是『图像帧无法读取』而被完全忽略。dd06a0d8 含购物车截图，与情绪句相斥。"
+        },
+        {
+          "text_contains": "这份甜",
+          "acceptable_asset_ids": [
+            "video-0771136ddcc65a8f",
+            "video-b579dac9cae75adc",
+            "video-20d1645c2c693613",
+            "video-cf6cd3d56a0709ba"
+          ],
+          "note": "画面核实：0771136d 的 24.0-28.8s 是玉米配水煮蛋和小番茄的健康餐摆盘；20d1645c 的 3.8-9.0s 同类摆盘。"
+        }
+      ]
+    },
+    {
+      "case_id": "brand-constraint-beauty",
+      "labels": ["指定品牌", "去重约束"],
+      "script": "美妆大牌小样，Dior 口红低价入手。优惠券记得领。",
+      "clip_duration": 3,
+      "expectations": [
+        {
+          "text_contains": "Dior",
+          "acceptable_asset_ids": ["video-9ac4b2f6d893c10e"],
+          "forbidden_asset_ids": [
+            "video-20d1645c2c693613",
+            "video-dc27786ae098c1e4",
+            "video-06a781fc4b1492af"
+          ],
+          "note": "画面核实：9ac4b2f6 的 0.0-3.6s 到 11.1-15.0s 是 DIOR 防尘袋、包装盒与迷你香水瓶。指定品牌是硬约束，玉米素材出现即错。"
+        },
+        {
+          "text_contains": "优惠券记得领",
+          "acceptable_asset_ids": [
+            "video-7afb46e08be31841",
+            "video-dd06a0d8feb2f218"
+          ],
+          "note": "库里唯一的美妆素材已被上一镜选走，_rank_segments 的 excluded_ids 会把它排除，所以本镜在现有素材下不可能选到美妆。这里标注的是退而求其次的合理结果：带优惠券文字的素材优于随机玉米特写。素材库扩充后应重标为美妆优惠券画面。"
+        }
+      ]
+    },
+    {
+      "case_id": "insufficient-material-gap",
+      "labels": ["素材不足"],
+      "script": "工程师在数据中心巡检服务器机柜。",
+      "clip_duration": 3,
+      "expectations": [
+        {
+          "text_contains": "数据中心",
+          "expect_gap": true,
+          "forbidden_asset_ids": [
+            "video-20d1645c2c693613",
+            "video-dc27786ae098c1e4",
+            "video-9ac4b2f6d893c10e",
+            "video-dd06a0d8feb2f218"
+          ],
+          "note": "9 条素材全是玉米与美妆，没有机房画面，必须留缺口让人工替换。"
+        }
+      ]
+    },
+    {
+      "case_id": "break-open-shot-selection",
+      "labels": ["片段选择", "动作定位"],
+      "script": "双手把玉米掰成两段，露出里面的玉米芯。",
+      "clip_duration": 3,
+      "query_context": "东北糯玉米",
+      "expectations": [
+        {
+          "text_contains": "掰成两段",
+          "acceptable_asset_ids": [
+            "video-cf6cd3d56a0709ba",
+            "video-dd06a0d8feb2f218",
+            "video-7afb46e08be31841",
+            "video-0771136ddcc65a8f"
+          ],
+          "forbidden_asset_ids": [
+            "video-dc27786ae098c1e4",
+            "video-9ac4b2f6d893c10e"
+          ],
+          "note": "替换原来的『分析失败素材』用例——那条素材（b579dac9）重新索引后描述已正常，原premise 不复存在。本用例改为直接考察镜头级定位：掰开动作只存在于特定窗口（cf6cd3d5 的 3.5-8.4s、dd06a0d8 的 35.3-40.2s、7afb46e0 的 12.7-17.1s、0771136d 的 9.6-14.4s）。dc27786a 全程只有完整玉米特写，没有掰开动作。"
+        }
+      ]
+    }
+  ]
+}

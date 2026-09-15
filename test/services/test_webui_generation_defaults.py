@@ -123,9 +123,9 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         _widget_by_key(first_session.selectbox, "bgm_type_select").set_value(
             "sonilo"
         ).run()
-        _widget_by_key(
-            first_session.text_input, "sonilo_bgm_prompt_input"
-        ).set_value("Bright acoustic underscore").run()
+        _widget_by_key(first_session.text_input, "sonilo_bgm_prompt_input").set_value(
+            "Bright acoustic underscore"
+        ).run()
         _widget_by_key(first_session.selectbox, "bgm_type_select").set_value(
             "elevenlabs"
         ).run()
@@ -172,77 +172,96 @@ def test_reusable_generation_settings_survive_a_new_webui_session():
         assert "video_terms" not in test_app_config
 
         second_session = _new_app()
-        assert _widget_by_key(
-            second_session.selectbox, "script_language_select"
-        ).value == "en-US"
-        assert _widget_by_key(
-            second_session.slider, "paragraph_number_input"
-        ).value == 3
-        assert _widget_by_key(
-            second_session.text_area, "video_script_prompt"
-        ).value == "Keep the hook concise."
-        assert _widget_by_key(
-            second_session.text_area, "custom_system_prompt"
-        ).value == "Write a factual short-video script."
-        assert _widget_by_key(
-            second_session.selectbox, "video_concat_mode_select"
-        ).value == "sequential"
-        assert _widget_by_key(
-            second_session.selectbox, "video_transition_mode_select"
-        ).value == "FadeIn"
-        assert _widget_by_key(
-            second_session.selectbox, "video_aspect_for_pexels"
-        ).value == "16:9"
-        assert _widget_by_key(
-            second_session.selectbox, "video_fit_mode_select"
-        ).value == "contain"
+        assert (
+            _widget_by_key(second_session.selectbox, "script_language_select").value
+            == "en-US"
+        )
+        assert (
+            _widget_by_key(second_session.slider, "paragraph_number_input").value == 3
+        )
+        assert (
+            _widget_by_key(second_session.text_area, "video_script_prompt").value
+            == "Keep the hook concise."
+        )
+        assert (
+            _widget_by_key(second_session.text_area, "custom_system_prompt").value
+            == "Write a factual short-video script."
+        )
+        assert (
+            _widget_by_key(second_session.selectbox, "video_concat_mode_select").value
+            == "sequential"
+        )
+        assert (
+            _widget_by_key(
+                second_session.selectbox, "video_transition_mode_select"
+            ).value
+            == "FadeIn"
+        )
+        assert (
+            _widget_by_key(second_session.selectbox, "video_aspect_for_pexels").value
+            == "16:9"
+        )
+        assert (
+            _widget_by_key(second_session.selectbox, "video_fit_mode_select").value
+            == "contain"
+        )
         second_session.session_state["video_source_select_en"] = "coverr"
         second_session.run()
-        assert _widget_by_key(
-            second_session.selectbox, "video_aspect_for_coverr"
-        ).value == "9:16"
+        assert (
+            _widget_by_key(second_session.selectbox, "video_aspect_for_coverr").value
+            == "9:16"
+        )
         second_session.session_state["video_source_select_en"] = "pexels"
         second_session.run()
-        assert _widget_by_key(
-            second_session.selectbox, "video_clip_duration_select"
-        ).value == 7
-        assert _widget_by_key(
-            second_session.slider, "video_clip_speed_slider"
-        ).value == 1.5
+        assert (
+            _widget_by_key(second_session.selectbox, "video_clip_duration_select").value
+            == 7
+        )
+        assert (
+            _widget_by_key(second_session.slider, "video_clip_speed_slider").value
+            == 1.5
+        )
         assert _widget_by_key(second_session.selectbox, "video_count_select").value == 3
-        assert _widget_by_key(
-            second_session.selectbox, "voice_volume_select"
-        ).value == 1.5
-        assert _widget_by_key(
-            second_session.selectbox, "voice_rate_select"
-        ).value == 1.2
+        assert (
+            _widget_by_key(second_session.selectbox, "voice_volume_select").value == 1.5
+        )
+        assert (
+            _widget_by_key(second_session.selectbox, "voice_rate_select").value == 1.2
+        )
         assert _widget_by_key(second_session.selectbox, "bgm_type_select").value == (
             "custom"
         )
         assert _widget_by_key(second_session.selectbox, "bgm_volume_select").value == (
             0.4
         )
-        assert _widget_by_key(
-            second_session.text_input, "custom_bgm_file_input"
-        ).value == "example.mp3"
+        assert (
+            _widget_by_key(second_session.text_input, "custom_bgm_file_input").value
+            == "example.mp3"
+        )
         _widget_by_key(second_session.selectbox, "bgm_type_select").set_value(
             "sonilo"
         ).run()
-        assert _widget_by_key(
-            second_session.text_input, "sonilo_bgm_prompt_input"
-        ).value == "Bright acoustic underscore"
+        assert (
+            _widget_by_key(second_session.text_input, "sonilo_bgm_prompt_input").value
+            == "Bright acoustic underscore"
+        )
         _widget_by_key(second_session.selectbox, "bgm_type_select").set_value(
             "elevenlabs"
         ).run()
-        assert _widget_by_key(
-            second_session.text_input, "elevenlabs_music_prompt_input"
-        ).value == "Calm cinematic underscore"
-        assert _widget_by_key(
-            second_session.checkbox, "subtitle_enabled_checkbox"
-        ).value is True
-        assert _widget_by_key(
-            second_session.color_picker, "stroke_color_picker"
-        ).value == "#123456"
+        assert (
+            _widget_by_key(
+                second_session.text_input, "elevenlabs_music_prompt_input"
+            ).value
+            == "Calm cinematic underscore"
+        )
+        assert (
+            _widget_by_key(second_session.checkbox, "subtitle_enabled_checkbox").value
+            is True
+        )
+        assert (
+            _widget_by_key(second_session.color_picker, "stroke_color_picker").value
+            == "#123456"
+        )
         assert _widget_by_key(second_session.slider, "stroke_width_slider").value == 2.5
 
         # Per-video content must not leak into a new session.
@@ -382,9 +401,10 @@ def test_seedance_source_shows_unchecked_paid_task_confirmation():
         app = _new_app()
 
     assert app.session_state["video_source_select_en"] == "volcengine_seedance"
-    assert _widget_by_key(
-        app.checkbox, "volcengine_seedance_confirm_charge"
-    ).value is False
+    assert (
+        _widget_by_key(app.checkbox, "volcengine_seedance_confirm_charge").value
+        is False
+    )
 
 
 def test_loomloom_tuning_survives_restart_without_persisting_payment_state():
@@ -442,15 +462,24 @@ def test_loomloom_tuning_survives_restart_without_persisting_payment_state():
         assert "loomloom_video_confirm_charge" not in test_ui_config
 
         second_session = _new_app()
-        assert _widget_by_key(
-            second_session.number_input, "loomloom_candidate_count"
-        ).value == 4
-        assert _widget_by_key(
-            second_session.number_input, "loomloom_script_duration_seconds"
-        ).value == 120
-        assert _widget_by_key(
-            second_session.number_input, "loomloom_video_scene_count"
-        ).value == 3
+        assert (
+            _widget_by_key(
+                second_session.number_input, "loomloom_candidate_count"
+            ).value
+            == 4
+        )
+        assert (
+            _widget_by_key(
+                second_session.number_input, "loomloom_script_duration_seconds"
+            ).value
+            == 120
+        )
+        assert (
+            _widget_by_key(
+                second_session.number_input, "loomloom_video_scene_count"
+            ).value
+            == 3
+        )
         assert second_session.session_state["loomloom_video_confirm_charge"] is False
 
 
@@ -492,6 +521,62 @@ def test_script_order_constraint_does_not_replace_saved_concat_preference():
         # preference, not the derived value shown while script-order matching ran.
         test_app_config["match_materials_to_script"] = False
         unconstrained_session = _new_app()
-        assert _widget_by_key(
-            unconstrained_session.selectbox, "video_concat_mode_select"
-        ).value == "random"
+        assert (
+            _widget_by_key(
+                unconstrained_session.selectbox, "video_concat_mode_select"
+            ).value
+            == "random"
+        )
+
+
+def test_advertising_post_process_labels_are_localized_in_chinese():
+    """广告规格和水印位置在中文页面显示中文映射，而内部值保持稳定。"""
+    test_app_config = dict(config.app, video_source="pexels")
+    test_ui_config = dict(
+        config.ui,
+        language="zh",
+        voice_mode="tts",
+        tts_server="azure-tts-v1",
+        voice_name="zh-CN-XiaoxiaoNeural-Female",
+    )
+    with (
+        patch.object(config, "app", test_app_config),
+        patch.object(config, "ui", test_ui_config),
+        patch.object(config, "try_save_config", return_value=True),
+        patch.object(
+            voice,
+            "get_all_azure_voices",
+            return_value=["zh-CN-XiaoxiaoNeural-Female"],
+        ),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
+        app.session_state["ui_language"] = "zh"
+        app.run()
+        # 广告图层控件改为在弹窗中渲染，先打开弹窗再断言标签映射。
+        app.session_state["post_process_dialog_open"] = True
+        app.run()
+        profile = _widget_by_key(app.selectbox, "post_process_profile_select")
+        position = _widget_by_key(
+            app.selectbox, "post_process_watermark_position_select"
+        )
+        assert profile.value == "竖屏 1080×1920"
+        assert position.value == "右上角"
+
+
+def test_new_specified_text_defaults_to_chinese_compatible_font():
+    """新增指定文字行应默认选择可绘制中文的字体，而非英文字体。"""
+    app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
+    app.session_state["ui_language"] = "zh"
+    app.run()
+    # 指定文字行在广告图层弹窗内维护，先打开弹窗再新增一行。
+    app.session_state["post_process_dialog_open"] = True
+    app.run()
+    enabled = _widget_by_key(app.checkbox, "post_process_enabled_checkbox")
+    enabled.set_value(True).run()
+    _widget_by_key(app.button, "post_process_add_text").click().run()
+    font = next(
+        item
+        for item in app.selectbox
+        if str(getattr(item, "key", "")).startswith("post_text_font_")
+    )
+    assert font.value == "MicrosoftYaHeiBold.ttc"

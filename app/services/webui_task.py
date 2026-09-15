@@ -1,5 +1,7 @@
+import os
 import threading
 from collections import deque
+from pathlib import Path
 
 from loguru import logger
 
@@ -11,6 +13,8 @@ from app.services import state as sm
 from app.services import task as tm
 from app.services.loomloom import LoomLoomConfirmedVideoRequest
 from app.utils.logging_utils import format_log_record
+from app.utils import utils
+from scripts.webui_adapter import process_webui_videos
 
 
 # WebUI 的配置保存在进程级全局字典中。原来的同步实现会在完整生成期间持有
@@ -56,6 +60,8 @@ def _run_generation(
     capture_logs: bool,
     voice_preview: dict | None = None,
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
+    post_process_spec_path: str | None = None,
+    post_process_output_root: str | None = None,
 ) -> dict:
     """
     在后台线程中执行现有视频流水线。
@@ -63,6 +69,15 @@ def _run_generation(
     Loguru 的 sink 是进程级资源，因此必须按当前工作线程过滤。否则同时运行的
     API 任务或其它页面日志会混入当前任务。页面只读取普通列表快照，不会从后台
     线程访问 Streamlit session_state，从根源上避免刷新时的 delta 路径错乱。
+
+    @param task_id Stable task identifier.
+    @param params Frozen MPT video parameters.
+    @param capture_logs Whether to retain this worker's log records.
+    @param voice_preview Optional prepared voice preview.
+    @param loomloom_video_request Optional confirmed paid-video request.
+    @param post_process_spec_path Optional WebUI post-processing spec path.
+    @param post_process_output_root Optional root for post-processed outputs.
+    @returns MPT result containing raw or post-processed video paths.
     """
     log_handler_id = None
     worker_thread_id = threading.get_ident()
@@ -78,12 +93,33 @@ def _run_generation(
 
         # 完整任务仍使用原来的配置锁，防止另一个 WebUI 会话在生成中途修改
         # Provider、密钥等进程级配置，造成同一条视频前后使用不同设置。
+        def post_process_callback(task_identifier, video_paths):
+            """Apply the saved WebUI post-process spec before cross-post scheduling."""
+            sm.state.update_task(
+                task_identifier,
+                state=const.TASK_STATE_PROCESSING,
+                progress=90,
+                post_process_state="processing",
+            )
+            return process_webui_videos(
+                task_identifier,
+                video_paths,
+                spec_path=Path(post_process_spec_path),
+                project_root=Path(utils.root_dir()),
+                output_root=Path(
+                    post_process_output_root
+                    or (utils.task_dir(task_identifier) + os.sep + "advertising")
+                ),
+            )
+
+        callback = post_process_callback if post_process_spec_path else None
         with config.runtime_config_lock():
             return tm.start(
                 task_id=task_id,
                 params=params,
                 voice_preview=voice_preview,
                 loomloom_video_request=loomloom_video_request,
+                post_process_callback=callback,
             )
     except Exception as exc:
         # tm.start 已负责把流水线异常转换成失败状态；这里额外保护日志 sink、
@@ -125,12 +161,23 @@ def submit_generation(
     capture_logs: bool = True,
     voice_preview: dict | None = None,
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
+    post_process_spec_path: str | None = None,
+    post_process_output_root: str | None = None,
 ) -> None:
     """
     登记并提交 WebUI 视频生成任务，调用后立即返回。
 
     任务状态必须在线程启动前写入。这样页面本次脚本执行结束时即可查询到任务，
     浏览器刷新或 WebSocket 重连也不依赖旧页面内存中的占位符。
+
+    @param task_id Stable task identifier.
+    @param params Video parameters copied before queueing.
+    @param capture_logs Whether to retain worker logs.
+    @param voice_preview Optional prepared voice preview.
+    @param loomloom_video_request Optional confirmed paid-video request.
+    @param post_process_spec_path Optional spec to apply before cross-posting.
+    @param post_process_output_root Optional root for post-processed outputs.
+    @returns None after queue submission or raises on scheduling failure.
     """
     task_params = params.model_copy(deep=True)
     # 预览载荷只包含不可变音频路径、参数快照和只读字幕时间轴。复制外层字典，
@@ -139,6 +186,8 @@ def submit_generation(
     # 已确认请求是冻结的数据对象，只在当前进程内传递。API Key 不会进入
     # VideoParams、任务状态、日志或落盘历史，也不会受后续页面 rerun 影响。
     loomloom_request_snapshot = loomloom_video_request
+    post_process_spec_snapshot = post_process_spec_path
+    post_process_output_snapshot = post_process_output_root
     sm.state.update_task(
         task_id,
         state=const.TASK_STATE_PROCESSING,
@@ -153,6 +202,8 @@ def submit_generation(
             capture_logs=capture_logs,
             voice_preview=voice_preview_snapshot,
             loomloom_video_request=loomloom_request_snapshot,
+            post_process_spec_path=post_process_spec_snapshot,
+            post_process_output_root=post_process_output_snapshot,
         )
     except Exception as exc:
         # 调度失败与流水线失败一样必须成为可查询状态，避免任务管理器永久显示

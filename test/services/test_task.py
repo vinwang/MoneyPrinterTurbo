@@ -119,6 +119,54 @@ class TestTaskService(unittest.TestCase):
             params.video_fit_mode,
         )
 
+    def test_generate_final_videos_forwards_frozen_local_storyboard_timeline(self):
+        """本地分镜必须把冻结的源/成片时间轴交给视频合成层。"""
+        timeline = [
+            {
+                "source_path": "snapshot.mp4",
+                "source_start_seconds": 1.0,
+                "source_end_seconds": 3.0,
+                "target_start_seconds": 0.0,
+                "target_end_seconds": 2.0,
+            }
+        ]
+        params = VideoParams(
+            video_subject="test",
+            video_source="local",
+            local_storyboard_plan=timeline,
+        )
+
+        with (
+            patch.object(tm.video, "combine_videos") as combine_videos,
+            patch.object(tm.video, "generate_video"),
+            patch.object(tm.sm.state, "update_task"),
+        ):
+            tm.generate_final_videos(
+                task_id="storyboard-task",
+                params=params,
+                downloaded_videos=["snapshot.mp4"],
+                audio_file="audio.mp3",
+                subtitle_path="",
+                audio_duration=2,
+            )
+
+        self.assertEqual(
+            combine_videos.call_args.kwargs["storyboard_timeline"], timeline
+        )
+
+    def test_successful_local_asset_usage_uses_asset_ids_from_frozen_plan(self):
+        """使用历史输入必须来自冻结计划，而不是页面提交时的临时选择。"""
+        params = VideoParams(
+            video_subject="test",
+            video_source="local",
+            local_storyboard_plan=[{"asset_id": "video-1"}, {"asset_id": "video-1"}],
+            local_bgm_asset_id="bgm-1",
+        )
+        with patch.object(tm.asset_library_runtime, "record_usage") as record_usage:
+            tm._record_successful_local_asset_usage(params)
+
+        record_usage.assert_called_once_with(("video-1", "bgm-1"))
+
     def test_generate_final_videos_uses_generated_sonilo_music(self):
         """Sonilo 必须针对每条拼接后的视频生成配乐，并传给最终混音。"""
         params = VideoParams(
@@ -882,8 +930,8 @@ class TestTaskService(unittest.TestCase):
                             tm.voice, "get_audio_duration", side_effect=fake_duration
                         ) as get_duration,
                     ):
-                        audio_file, audio_duration, result_sub_maker = tm.generate_audio(
-                            task_id, params, "script"
+                        audio_file, audio_duration, result_sub_maker = (
+                            tm.generate_audio(task_id, params, "script")
                         )
                 finally:
                     shutil.rmtree(task_dir, ignore_errors=True)
@@ -1301,6 +1349,49 @@ class TestTaskService(unittest.TestCase):
             **result,
         )
 
+    def test_post_process_callback_runs_before_cross_post_and_replaces_video_paths(
+        self,
+    ):
+        """WebUI post-processing must finish before optional publishing receives paths."""
+        params = VideoParams(video_subject="Callback video")
+        post_process = MagicMock(return_value=("processed.mp4",))
+
+        with (
+            patch.object(tm, "generate_script", return_value="generated script"),
+            patch.object(tm, "generate_terms", return_value=["callback"]),
+            patch.object(tm, "save_script_data"),
+            patch.object(tm, "generate_audio", return_value=("audio.mp3", 5, object())),
+            patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+            patch.object(tm, "get_video_materials", return_value=["clip.mp4"]),
+            patch.object(
+                tm,
+                "generate_final_videos",
+                return_value=(["raw-final.mp4"], ["combined.mp4"], []),
+            ),
+            patch.object(
+                tm.upload_post.upload_post_service, "is_configured", return_value=True
+            ),
+            patch.dict(tm.config.app, {"upload_post_auto_upload": True}, clear=False),
+            patch.object(
+                type(tm.upload_post.upload_post_service),
+                "platforms",
+                new_callable=PropertyMock,
+                return_value=["tiktok"],
+            ),
+            patch.object(tm, "_schedule_cross_post", return_value=None) as schedule,
+            patch.object(tm.sm.state, "update_task"),
+        ):
+            result = tm.start(
+                "callback-video",
+                params,
+                post_process_callback=post_process,
+            )
+
+        post_process.assert_called_once_with("callback-video", ("raw-final.mp4",))
+        self.assertEqual(result["videos"], ["processed.mp4"])
+        schedule.assert_called_once()
+        self.assertEqual(schedule.call_args.kwargs["video_paths"], ["processed.mp4"])
+
     def test_start_marks_pipeline_failures(self):
         """
         音频、素材和最终视频任一关键产物缺失时都必须进入失败状态，不能把
@@ -1429,9 +1520,24 @@ class TestTaskService(unittest.TestCase):
                 ),
             ),
             patch.object(service, "is_configured", return_value=True),
-            patch.object(type(service), "auto_upload", new_callable=PropertyMock, return_value=True),
-            patch.object(type(service), "platforms", new_callable=PropertyMock, return_value=["youtube"]),
-            patch.object(type(service), "youtube_privacy_status", new_callable=PropertyMock, return_value="unlisted"),
+            patch.object(
+                type(service),
+                "auto_upload",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                type(service),
+                "platforms",
+                new_callable=PropertyMock,
+                return_value=["youtube"],
+            ),
+            patch.object(
+                type(service),
+                "youtube_privacy_status",
+                new_callable=PropertyMock,
+                return_value="unlisted",
+            ),
             patch.object(
                 tm.llm,
                 "generate_social_metadata",
@@ -1517,9 +1623,24 @@ class TestTaskService(unittest.TestCase):
                 return_value=(["final.mp4"], ["combined.mp4"], []),
             ),
             patch.object(service, "is_configured", return_value=True),
-            patch.object(type(service), "auto_upload", new_callable=PropertyMock, return_value=True),
-            patch.object(type(service), "platforms", new_callable=PropertyMock, return_value=["tiktok"]),
-            patch.object(type(service), "youtube_privacy_status", new_callable=PropertyMock, return_value="private"),
+            patch.object(
+                type(service),
+                "auto_upload",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                type(service),
+                "platforms",
+                new_callable=PropertyMock,
+                return_value=["tiktok"],
+            ),
+            patch.object(
+                type(service),
+                "youtube_privacy_status",
+                new_callable=PropertyMock,
+                return_value="private",
+            ),
             patch.object(tm.upload_post, "cross_post_video") as cross_post,
             patch.object(tm.sm, "state", state),
             patch.object(
@@ -1615,9 +1736,24 @@ class TestTaskService(unittest.TestCase):
                 return_value=(["final.mp4"], ["combined.mp4"], []),
             ),
             patch.object(service, "is_configured", return_value=True),
-            patch.object(type(service), "auto_upload", new_callable=PropertyMock, return_value=True),
-            patch.object(type(service), "platforms", new_callable=PropertyMock, return_value=["tiktok"]),
-            patch.object(type(service), "youtube_privacy_status", new_callable=PropertyMock, return_value="private"),
+            patch.object(
+                type(service),
+                "auto_upload",
+                new_callable=PropertyMock,
+                return_value=True,
+            ),
+            patch.object(
+                type(service),
+                "platforms",
+                new_callable=PropertyMock,
+                return_value=["tiktok"],
+            ),
+            patch.object(
+                type(service),
+                "youtube_privacy_status",
+                new_callable=PropertyMock,
+                return_value="private",
+            ),
             patch.object(tm.sm, "state", state),
             patch.object(tm._cross_post_slots, "acquire", return_value=False),
             patch.object(tm._cross_post_executor, "submit") as submit,
