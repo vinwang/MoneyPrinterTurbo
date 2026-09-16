@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import math
 import re
+from array import array
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -164,23 +167,25 @@ def _segment_score(
     asset: LibraryAsset,
     *,
     query_tokens: frozenset[str] | set[str] | None = None,
-    semantic_tokens: frozenset[str] | set[str] | None = None,
+    overlap: int | None = None,
+    semantic_size: int | None = None,
 ) -> float:
     """
     只使用描述、标签和低权重目录分类计算匹配分，不使用文件名。
 
-    `query_tokens` / `semantic_tokens` 允许调用方传入已经分好的 token 集合：
-    一次匹配要给几千个片段打分，分词是最大的开销，倒排索引建好后就不该
-    再逐片段重算。
+    `query_tokens`、`overlap`、`semantic_size` 允许调用方传入已经算好的
+    查询 token、交集数和片段 token 数：一次匹配要给几千个片段打分，分词是
+    最大的开销，倒排索引建好后就不该再逐片段重算。
     """
     if query_tokens is None:
         query_tokens = _tokens(query)
-    if semantic_tokens is None:
+    if overlap is None or semantic_size is None:
         semantic_tokens = _tokens(_semantic_text(segment, asset))
-    if not query_tokens or not semantic_tokens:
+        overlap = len(query_tokens & semantic_tokens)
+        semantic_size = len(semantic_tokens)
+    if not query_tokens or not semantic_size:
         return -_recent_penalty(asset)
-    overlap = len(query_tokens & semantic_tokens)
-    score = overlap / math.sqrt(len(query_tokens) * len(semantic_tokens))
+    score = overlap / math.sqrt(len(query_tokens) * semantic_size)
     category_overlap = len(query_tokens & _tokens(asset.category))
     score += min(category_overlap, _MAX_CATEGORY_OVERLAPS) * _CATEGORY_SCORE_WEIGHT
     return score - _recent_penalty(asset)
@@ -198,9 +203,9 @@ class RecallIndex:
     因此不套用这条捷径。
     """
 
-    postings: Mapping[str, tuple[int, ...]]
+    postings: Mapping[str, array]
     segments: tuple[LibrarySegment, ...]
-    token_sets: tuple[frozenset[str], ...]
+    token_counts: array
 
 
 def build_recall_index(
@@ -213,37 +218,39 @@ def build_recall_index(
     @param segments Segments the match may draw from.
     @param assets_by_id Assets keyed by ID, used for BGM-only semantic fields.
     @returns Token postings, the segment tuple they index into, and each
-        segment's semantic token set so scoring does not re-tokenize.
+        segment's semantic token count so scoring does not re-tokenize.
     """
-    postings: dict[str, list[int]] = {}
+    # 倒排表和 token 数都用紧凑数组：三万片段的 Python set 元组会占几百 MB，
+    # 而打分只需要交集数和片段 token 数，前者可以从倒排表直接累加得到。
+    postings: dict[str, array] = {}
     ordered = tuple(segments)
-    token_sets: list[frozenset[str]] = []
+    token_counts = array("I")
     for position, segment in enumerate(ordered):
         asset = assets_by_id.get(segment.asset_id)
-        tokens = (
-            frozenset() if asset is None else frozenset(_tokens(_semantic_text(segment, asset)))
-        )
-        token_sets.append(tokens)
+        tokens = () if asset is None else _tokens(_semantic_text(segment, asset))
+        token_counts.append(len(tokens))
         for token in tokens:
-            postings.setdefault(token, []).append(position)
-    return RecallIndex(
-        postings={token: tuple(values) for token, values in postings.items()},
-        segments=ordered,
-        token_sets=tuple(token_sets),
-    )
+            posting = postings.get(token)
+            if posting is None:
+                posting = postings[token] = array("I")
+            posting.append(position)
+    return RecallIndex(postings=postings, segments=ordered, token_counts=token_counts)
 
 
 def _recalled_segments(
     index: RecallIndex,
     query_tokens: frozenset[str] | set[str],
-) -> tuple[tuple[LibrarySegment, frozenset[str]], ...]:
-    """取出与查询至少共享一个 token 的片段及其缓存的语义 token。"""
-    positions: set[int] = set()
-    for token in query_tokens:
-        positions.update(index.postings.get(token, ()))
+) -> tuple[tuple[LibrarySegment, int, int], ...]:
+    """取出与查询至少共享一个 token 的片段，附带交集数和片段 token 数。"""
+    postings = index.postings
+    overlaps = Counter(
+        chain.from_iterable(postings[token] for token in query_tokens if token in postings)
+    )
+    segments = index.segments
+    token_counts = index.token_counts
     return tuple(
-        (index.segments[position], index.token_sets[position])
-        for position in sorted(positions)
+        (segments[position], overlap, token_counts[position])
+        for position, overlap in sorted(overlaps.items())
     )
 
 
@@ -301,14 +308,14 @@ def _rank_segments(
         str(item).strip().lower() for item in must_match if str(item).strip()
     )
     # 第一阶段召回：只在要求相关性时收窄，见 RecallIndex 的等价性说明。
-    # 查询词只分一次；索引路径复用建索引时缓存的片段 token，全表路径逐条分词。
+    # 查询词只分一次；索引路径带回交集数和片段 token 数，全表路径逐条分词。
     query_tokens = frozenset(_tokens(query))
-    candidates: Sequence[tuple[LibrarySegment, frozenset[str] | None]] = (
+    candidates: Sequence[tuple[LibrarySegment, int | None, int | None]] = (
         _recalled_segments(recall_index, query_tokens)
         if recall_index is not None and require_relevance
-        else tuple((segment, None) for segment in segments)
+        else tuple((segment, None, None) for segment in segments)
     )
-    for segment, semantic_tokens in candidates:
+    for segment, overlap, semantic_size in candidates:
         asset = assets_by_id.get(segment.asset_id)
         if asset is None or segment.asset_id in excluded:
             continue
@@ -320,7 +327,8 @@ def _rank_segments(
             segment,
             asset,
             query_tokens=query_tokens,
-            semantic_tokens=semantic_tokens,
+            overlap=overlap,
+            semantic_size=semantic_size,
         )
         semantic_score = score + _recent_penalty(asset)
         if require_relevance and semantic_score < _MIN_RELEVANCE_SCORE:
