@@ -291,3 +291,98 @@ def test_gap_shot_offers_a_manual_material_picker():
             filled, {"1": "video-worker", "2": "video-server"}
         )
         assert [item["asset_id"] for item in plan] == ["video-worker", "video-server"]
+
+def test_asset_annotation_editor_saves_manual_description_and_tags():
+    """标签编辑入口应回填已有人工标注，并把修改写入素材库。"""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        video_path = root / "人物" / "worker.mp4"
+        video_path.parent.mkdir()
+        video_path.write_bytes(b"video")
+        asset = asset_library.LibraryAsset(
+            "video-worker",
+            "video",
+            str(root),
+            "人物/worker.mp4",
+            "人物",
+            4.0,
+            1080,
+            1920,
+            5,
+            "hash-worker",
+            "自动识别的人物场景",
+            ("自动",),
+            "ready",
+            "",
+            0,
+            None,
+        )
+        annotations = asset_library.AssetAnnotations(
+            asset_id="video-worker",
+            manual_description="工人在车间作业",
+            manual_tags=("车间", "工人"),
+            auto_description="自动识别的人物场景",
+            auto_tags=("自动",),
+        )
+        app_config = dict(
+            config.app,
+            video_source="local",
+            local_video_library_directory=str(root),
+            local_bgm_library_directory="",
+        )
+        ui_config = dict(config.ui, language="en", bgm_type="")
+        saved = []
+        with (
+            patch.object(config, "app", app_config),
+            patch.object(config, "ui", ui_config),
+            patch.object(config, "try_save_config", return_value=True),
+            patch.object(
+                asset_library,
+                "scan_library",
+                return_value=asset_library.ScanSummary(1, 0, 0, 1, 0, 0, ()),
+            ),
+            patch.object(
+                asset_library,
+                "list_assets",
+                side_effect=lambda **kwargs: (asset,)
+                if kwargs.get("kind") == "video"
+                else (),
+            ),
+            patch.object(
+                asset_library, "get_asset_annotations", return_value=annotations
+            ),
+            patch.object(
+                asset_library,
+                "update_asset_annotations",
+                side_effect=lambda asset_id, **kwargs: saved.append(
+                    (asset_id, kwargs)
+                ),
+            ),
+            patch.object(asset_library, "resolve_asset_path", return_value=video_path),
+        ):
+            app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
+            app.session_state["ui_language"] = "en"
+            # 标注入口在设置对话框的素材来源页，必须先打开对话框才会渲染。
+            app.session_state["settings_dialog_open"] = True
+            app.session_state["settings_dialog_target_tab"] = "material"
+            app.run()
+
+            assert [str(item.value) for item in app.exception] == []
+            # 已有人工标注必须回填，否则保存会把用户之前填的内容清空。
+            description_box = app.text_area(key="library_annotation_description")
+            assert description_box.value == "工人在车间作业"
+            tags_box = app.text_input(key="library_annotation_tags")
+            assert tags_box.value == "车间, 工人"
+
+            app.button(key="save_library_annotation_button").click().run()
+
+            assert [str(item.value) for item in app.exception] == []
+            assert saved == [
+                (
+                    "video-worker",
+                    {
+                        "description": "工人在车间作业",
+                        "tags": ["车间", "工人"],
+                    },
+                )
+            ]

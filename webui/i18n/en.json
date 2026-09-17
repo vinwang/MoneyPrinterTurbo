@@ -665,6 +665,19 @@
     "Storyboard Gap Needs Material": "This shot has no relevant material",
     "Fill Storyboard Gap": "Pick a material for shot",
     "Storyboard Gap Unfilled": "Not selected — edit the script or add materials",
-    "Storyboard Gaps Need Material": "Some shots still have no material selected"
+    "Storyboard Gaps Need Material": "Some shots still have no material selected",
+    "Asset Annotation": "Asset Annotation",
+    "Asset Annotation Help": "Correct a material's description and tags by hand. Manual values take priority when matching and survive re-indexing; clear a field to fall back to the automatic analysis.",
+    "Annotate Asset": "Material",
+    "Auto Analysis Description": "Automatic description",
+    "Auto Analysis Tags": "Automatic tags",
+    "Manual Description": "Manual description",
+    "Manual Description Help": "Used instead of the automatic description when matching. Leave empty to keep using the automatic one.",
+    "Manual Tags": "Manual tags",
+    "Manual Tags Help": "Comma separated. Added on top of the automatic tags rather than replacing them.",
+    "Save Asset Annotation": "Save annotation",
+    "Asset Annotation Saved": "Annotation saved. The storyboard will be matched again.",
+    "Asset Annotation Failed": "Cannot save the annotation",
+    "No Indexed Asset To Annotate": "No indexed material yet. Configure the library directory and update the index first."
   }
 }

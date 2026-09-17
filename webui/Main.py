@@ -529,6 +529,78 @@ def _render_local_asset_library_settings(panel):
                             analyzed=summary.analyzed,
                         )
                     )
+        with st.container(border=True):
+            st.markdown(f"#### {tr('Asset Annotation')}")
+            st.caption(tr("Asset Annotation Help"))
+            _render_asset_annotation_editor()
+
+
+def _render_asset_annotation_editor():
+    """
+    渲染素材人工描述与标签的编辑入口。
+
+    人工标注与自动分析分开存储：人工描述优先用于匹配，人工标签追加在自动
+    标签之后，重新索引不会覆盖。清空输入即恢复自动分析结果。
+
+    @returns None；保存结果写入素材库数据库。
+    """
+    library_videos = _ready_library_videos()
+    if not library_videos:
+        st.caption(tr("No Indexed Asset To Annotate"))
+        return
+    asset_by_id = {asset.asset_id: asset for asset in library_videos}
+    asset_id = st.selectbox(
+        tr("Annotate Asset"),
+        options=list(asset_by_id),
+        format_func=lambda item: _library_candidate_label(asset_by_id[item]),
+        key="library_annotation_asset",
+    )
+    try:
+        annotations = asset_library.get_asset_annotations(asset_id)
+    except asset_library.AssetLibraryError as exc:
+        st.error(f"{tr('Asset Annotation Failed')}: {exc}")
+        return
+    # 展示被覆盖的自动分析，用户才知道自己改掉了什么。
+    st.caption(
+        f"{tr('Auto Analysis Description')}: {annotations.auto_description or '-'}"
+    )
+    st.caption(
+        f"{tr('Auto Analysis Tags')}: {', '.join(annotations.auto_tags) or '-'}"
+    )
+    description = st.text_area(
+        tr("Manual Description"),
+        value=annotations.manual_description,
+        key="library_annotation_description",
+        help=tr("Manual Description Help"),
+    )
+    tags_text = st.text_input(
+        tr("Manual Tags"),
+        value=", ".join(annotations.manual_tags),
+        key="library_annotation_tags",
+        help=tr("Manual Tags Help"),
+    )
+    if not st.button(
+        tr("Save Asset Annotation"),
+        key="save_library_annotation_button",
+        use_container_width=True,
+        type="secondary",
+    ):
+        return
+    tags = [item.strip() for item in str(tags_text).replace("，", ",").split(",")]
+    try:
+        asset_library.update_asset_annotations(
+            asset_id,
+            description=str(description).strip(),
+            tags=[item for item in tags if item],
+        )
+    except asset_library.AssetLibraryError as exc:
+        st.error(f"{tr('Asset Annotation Failed')}: {exc}")
+        return
+    # 标注参与匹配打分，改完必须让下一次渲染重新匹配。
+    st.session_state["local_storyboard_signature"] = ""
+    st.session_state["local_storyboard_match"] = None
+    _clear_local_storyboard_widgets()
+    st.success(tr("Asset Annotation Saved"))
 
 
 def _ready_library_videos():

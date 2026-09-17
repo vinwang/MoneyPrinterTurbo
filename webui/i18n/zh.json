@@ -665,6 +665,19 @@
     "Storyboard Gap Needs Material": "这一镜没有相关素材",
     "Fill Storyboard Gap": "为该镜人工选择素材",
     "Storyboard Gap Unfilled": "未选择——可改文案或补充素材库",
-    "Storyboard Gaps Need Material": "仍有分镜没有选择素材"
+    "Storyboard Gaps Need Material": "仍有分镜没有选择素材",
+    "Asset Annotation": "素材标注",
+    "Asset Annotation Help": "人工修正素材的描述和标签。人工内容在匹配时优先使用，重新索引不会被覆盖；清空则恢复自动分析结果。",
+    "Annotate Asset": "素材",
+    "Auto Analysis Description": "自动描述",
+    "Auto Analysis Tags": "自动标签",
+    "Manual Description": "人工描述",
+    "Manual Description Help": "匹配时代替自动描述使用。留空则继续使用自动描述。",
+    "Manual Tags": "人工标签",
+    "Manual Tags Help": "用逗号分隔。追加在自动标签之后，不会替换自动标签。",
+    "Save Asset Annotation": "保存标注",
+    "Asset Annotation Saved": "标注已保存，将重新匹配分镜。",
+    "Asset Annotation Failed": "标注保存失败",
+    "No Indexed Asset To Annotate": "还没有已索引的素材。请先配置素材库目录并更新索引。"
   }
 }

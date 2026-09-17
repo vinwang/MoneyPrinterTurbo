@@ -1,5 +1,5 @@
-import time
 import unittest
+from unittest.mock import patch
 
 from app.services import asset_library, asset_matching
 
@@ -145,30 +145,64 @@ class TestRecallIndex(unittest.TestCase):
 
         self.assertNotIn(excluded, [item[0].asset_id for item in ranked])
 
-    def test_index_is_reused_across_shots_of_one_match(self):
-        assets, segments = _corpus(asset_count=800)
+    def test_index_is_built_once_per_match_not_once_per_shot(self):
+        # 一条文案通常拆 2-4 镜，逐镜重建索引会把建索引成本乘上分镜数，
+        # 反而比全表打分更慢。这里断言调用次数而不是墙钟耗时：
+        # 耗时断言在整套测试的负载下会随机翻转，而调用次数是确定的。
+        assets, segments = _corpus(asset_count=40)
+        script = "真空包装玉米整齐堆放。掰开玉米展示晶莹颗粒。水煮玉米搭配鸡蛋。"
+        calls = []
+        real_build = asset_matching.build_recall_index
+
+        def counting_build(*args, **kwargs):
+            calls.append(1)
+            return real_build(*args, **kwargs)
+
+        with (
+            patch.object(
+                asset_matching.library,
+                "list_assets",
+                side_effect=lambda **kwargs: tuple(assets.values())
+                if kwargs.get("kind") == "video"
+                else (),
+            ),
+            patch.object(
+                asset_matching.library, "list_segments", return_value=segments
+            ),
+            patch.object(
+                asset_matching, "build_recall_index", side_effect=counting_build
+            ),
+        ):
+            match = asset_matching.match_storyboard(script, clip_duration=3)
+
+        self.assertGreater(len(match.shots), 1)
+        self.assertEqual(len(calls), 1)
+
+    def test_recall_narrows_the_pool_it_has_to_score(self):
+        # 收窄候选池是加速的来源；池子必须真的比全库小，且结果与全表一致。
+        assets, segments = _corpus(asset_count=200)
         index = asset_matching.build_recall_index(segments, assets)
+        query = "真空包装玉米整齐堆放"
 
-        started = time.perf_counter()
-        for _ in range(6):
-            asset_matching._rank_segments(
-                "真空包装玉米整齐堆放",
-                segments,
-                assets,
-                count=3,
-                recall_index=index,
-            )
-        narrowed_seconds = time.perf_counter() - started
+        recalled = asset_matching._recalled_segments(
+            index, frozenset(asset_matching._tokens(query))
+        )
 
-        started = time.perf_counter()
-        for _ in range(6):
-            asset_matching._rank_segments(
-                "真空包装玉米整齐堆放", segments, assets, count=3
-            )
-        full_seconds = time.perf_counter() - started
-
-        # 倒排召回应当明显快于全表打分；放宽到 1.5 倍以容忍机器抖动。
-        self.assertLess(narrowed_seconds * 1.5, full_seconds)
+        self.assertLess(len(recalled), len(segments))
+        self.assertEqual(
+            [
+                (item[0].segment_id, round(item[1], 9))
+                for item in asset_matching._rank_segments(
+                    query, segments, assets, count=3, recall_index=index
+                )
+            ],
+            [
+                (item[0].segment_id, round(item[1], 9))
+                for item in asset_matching._rank_segments(
+                    query, segments, assets, count=3
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":

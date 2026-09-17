@@ -61,6 +61,17 @@ LibrarySegment = segment_index.LibrarySegment
 
 
 @dataclass(frozen=True, slots=True)
+class AssetAnnotations:
+    """一个资产的人工标注与它覆盖的自动分析结果。"""
+
+    asset_id: str
+    manual_description: str
+    manual_tags: tuple[str, ...]
+    auto_description: str
+    auto_tags: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ScanSummary:
     """一次素材库扫描的可展示统计。"""
 
@@ -1038,6 +1049,60 @@ def list_segments(
         raise AssetLibraryError(str(exc)) from exc
     except sqlite3.Error as exc:
         raise AssetLibraryError("cannot read asset segment index") from exc
+    finally:
+        connection.close()
+
+
+def get_asset_annotations(
+    asset_id: str,
+    *,
+    db_path: Path | None = None,
+) -> AssetAnnotations:
+    """
+    读取一个资产的人工标注及被它覆盖的自动分析结果。
+
+    `LibraryAsset.description` 已经是「人工优先、否则自动」的合并结果，
+    标签也已合并，因此编辑界面无法从中回填用户上次填的内容、也看不到
+    自己覆盖掉了什么。这里按原始字段分别返回。
+
+    @param asset_id 已索引的视频或 BGM 资产 ID。
+    @param db_path 可选数据库路径。
+    @returns 人工描述、人工标签，以及自动描述和自动标签。
+    @raises AssetLibraryError 资产不存在、标注损坏或数据库不可用。
+    """
+    if not isinstance(asset_id, str) or not asset_id.strip():
+        raise AssetLibraryError("asset ID is required")
+    connection = _connect(db_path or default_db_path())
+    try:
+        _ensure_schema(connection)
+        row = connection.execute(
+            """
+            SELECT asset_id, description, tags_json,
+                   manual_description, manual_tags_json
+            FROM assets WHERE asset_id = ?
+            """,
+            (asset_id,),
+        ).fetchone()
+        if row is None:
+            raise AssetLibraryError(f"asset is not indexed: {asset_id}")
+        try:
+            auto_tags = json.loads(row["tags_json"])
+            manual_tags = json.loads(row["manual_tags_json"])
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise AssetLibraryError(
+                f"asset index contains invalid tags: {asset_id}"
+            ) from exc
+        if not isinstance(auto_tags, list) or not isinstance(manual_tags, list):
+            raise AssetLibraryError(f"asset index contains invalid tags: {asset_id}")
+        return AssetAnnotations(
+            asset_id=row["asset_id"],
+            manual_description=str(row["manual_description"] or ""),
+            manual_tags=tuple(str(tag) for tag in manual_tags),
+            auto_description=str(row["description"] or ""),
+            auto_tags=tuple(str(tag) for tag in auto_tags),
+        )
+    except sqlite3.Error as exc:
+        raise AssetLibraryError("cannot read asset annotations") from exc
     finally:
         connection.close()
 

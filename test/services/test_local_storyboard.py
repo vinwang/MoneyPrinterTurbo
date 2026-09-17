@@ -1087,6 +1087,112 @@ class TestLocalStoryboard(unittest.TestCase):
         ranked = asset_matching._rank_assets("咖啡", (rescanned,))
         self.assertEqual(tuple(asset.asset_id for asset in ranked), (rescanned.asset_id,))
 
+    def test_annotations_are_readable_separately_from_the_auto_analysis(self):
+        # 标签编辑界面要回填用户上次填的内容，并展示被覆盖的自动描述。
+        # LibraryAsset.description 已经是合并结果，读不出这两者的区别。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video_root = root / "library"
+            (video_root / "日常").mkdir(parents=True)
+            (video_root / "日常" / "coffee.mp4").write_bytes(b"video")
+            db_path = root / "library.sqlite3"
+
+            with patch.object(
+                asset_library_shots,
+                "extract_frames_at",
+                side_effect=_frames_per_window,
+            ):
+                asset_library.scan_library(
+                    video_root,
+                    None,
+                    db_path=db_path,
+                    probe_fn=lambda _path: {
+                        "duration": 5.0,
+                        "width": 1080,
+                        "height": 1920,
+                    },
+                    vision_fn=lambda _path, frames: _window_analysis(
+                        "自动识别的场景", ["自动"], len(frames)
+                    ),
+                )
+            indexed = asset_library.list_assets(kind="video", db_path=db_path)[0]
+
+            empty = asset_library.get_asset_annotations(
+                indexed.asset_id, db_path=db_path
+            )
+            self.assertEqual(empty.manual_description, "")
+            self.assertEqual(empty.manual_tags, ())
+            self.assertEqual(empty.auto_description, "自动识别的场景")
+            self.assertIn("自动", empty.auto_tags)
+
+            asset_library.update_asset_annotations(
+                indexed.asset_id,
+                description="咖啡店里喝咖啡",
+                tags=("咖啡", "休息"),
+                db_path=db_path,
+            )
+            annotated = asset_library.get_asset_annotations(
+                indexed.asset_id, db_path=db_path
+            )
+
+            self.assertEqual(annotated.manual_description, "咖啡店里喝咖啡")
+            self.assertEqual(annotated.manual_tags, ("咖啡", "休息"))
+            # 人工描述不覆盖自动分析，原值必须仍然可读。
+            self.assertEqual(annotated.auto_description, "自动识别的场景")
+
+    def test_reading_annotations_rejects_an_unknown_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "library.sqlite3"
+            with self.assertRaisesRegex(
+                asset_library.AssetLibraryError, "not indexed"
+            ):
+                asset_library.get_asset_annotations("video-missing", db_path=db_path)
+
+    def test_clearing_a_manual_description_falls_back_to_the_auto_analysis(self):
+        # 用户清空人工描述应恢复自动描述，而不是把素材变成没有描述。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video_root = root / "library"
+            (video_root / "日常").mkdir(parents=True)
+            (video_root / "日常" / "coffee.mp4").write_bytes(b"video")
+            db_path = root / "library.sqlite3"
+
+            with patch.object(
+                asset_library_shots,
+                "extract_frames_at",
+                side_effect=_frames_per_window,
+            ):
+                asset_library.scan_library(
+                    video_root,
+                    None,
+                    db_path=db_path,
+                    probe_fn=lambda _path: {
+                        "duration": 5.0,
+                        "width": 1080,
+                        "height": 1920,
+                    },
+                    vision_fn=lambda _path, frames: _window_analysis(
+                        "自动识别的场景", ["自动"], len(frames)
+                    ),
+                )
+            indexed = asset_library.list_assets(kind="video", db_path=db_path)[0]
+            asset_library.update_asset_annotations(
+                indexed.asset_id,
+                description="人工描述",
+                tags=("人工",),
+                db_path=db_path,
+            )
+            asset_library.update_asset_annotations(
+                indexed.asset_id,
+                description="",
+                tags=(),
+                db_path=db_path,
+            )
+            cleared = asset_library.get_asset(indexed.asset_id, db_path=db_path)
+
+            self.assertEqual(cleared.description, "自动识别的场景")
+            self.assertNotIn("人工", cleared.tags)
+
     def test_legacy_library_schema_migrates_persistently(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.sqlite3"
