@@ -450,9 +450,10 @@ def _library_signature(video_root, bgm_root):
 def _clear_local_storyboard_widgets():
     """清除旧分镜控件状态，防止素材库或文案变化时复用无效 ID。"""
     for key in tuple(st.session_state):
-        if str(key).startswith("local_storyboard_shot_"):
+        if str(key).startswith(("local_storyboard_shot_", "local_storyboard_gap_")):
             st.session_state.pop(key, None)
     st.session_state["local_storyboard_selected_ids"] = {}
+    st.session_state["local_storyboard_manual_fills"] = {}
     st.session_state["local_library_bgm_id"] = ""
     st.session_state["local_library_bgm_candidates"] = ()
 
@@ -530,6 +531,53 @@ def _render_local_asset_library_settings(panel):
                     )
 
 
+def _ready_library_videos():
+    """读取全部已索引视频，供缺口镜人工替换时选择。"""
+    try:
+        return asset_library.list_assets(kind="video", analysis_status="ready")
+    except asset_library.AssetLibraryError as exc:
+        st.error(f"{tr('Local Asset Index Failed')}: {exc}")
+        return ()
+
+
+def _render_storyboard_gap(shot, selected_ids, manual_fills):
+    """
+    为没有候选的分镜渲染人工替换入口。
+
+    匹配器宁可留缺口也不硬凑无关素材，所以这里不预选任何素材——默认留空，
+    由用户显式决定用哪条素材补这一镜，或回去改文案、补素材库。
+
+    @param shot 没有候选的分镜。
+    @param selected_ids 本次渲染累计的分镜选择，命中时写入。
+    @param manual_fills 本次渲染累计的人工替换记录，命中时写入。
+    @returns None；选择写入传入的两个字典。
+    """
+    st.warning(
+        f"{tr('Storyboard Gap Needs Material')}: "
+        f"{tr('Storyboard Shot')} {shot.index} · {shot.text}"
+    )
+    st.caption(f"query: {shot.visual_query or shot.text}")
+    library_videos = _ready_library_videos()
+    if not library_videos:
+        return
+    asset_by_id = {asset.asset_id: asset for asset in library_videos}
+    options = ["", *asset_by_id]
+    picked = st.selectbox(
+        f"{tr('Fill Storyboard Gap')} {shot.index}",
+        options=options,
+        format_func=lambda asset_id: (
+            tr("Storyboard Gap Unfilled")
+            if not asset_id
+            else _library_candidate_label(asset_by_id[asset_id])
+        ),
+        key=f"local_storyboard_gap_{shot.index}",
+    )
+    if not picked:
+        return
+    selected_ids[str(shot.index)] = picked
+    manual_fills[str(shot.index)] = picked
+
+
 def _render_storyboard_match(match):
     """
     渲染自动分镜候选，并把用户选择保存到当前会话。
@@ -540,6 +588,7 @@ def _render_storyboard_match(match):
     # 候选已按匹配结果自动选好首选，默认折叠；想换镜头再展开，避免每次编辑文案
     # 都把整页候选铺开。视频预览另由开关控制，不勾选时不加载任何播放器。
     selected_ids = {}
+    manual_fills = {}
     with st.expander(
         tr("Storyboard Auto Selected").format(count=len(match.shots)),
         expanded=False,
@@ -552,11 +601,7 @@ def _render_storyboard_match(match):
             candidate_by_id = {asset.asset_id: asset for asset in shot.candidates}
             candidate_ids = list(candidate_by_id)
             if not candidate_ids:
-                st.error(
-                    f"{tr('Local Storyboard Match Failed')}: "
-                    f"no relevant candidate for shot {shot.index}"
-                )
-                st.caption(f"{shot.text} · query: {shot.visual_query or shot.text}")
+                _render_storyboard_gap(shot, selected_ids, manual_fills)
                 continue
             saved_id = st.session_state.get("local_storyboard_selected_ids", {}).get(
                 str(shot.index), candidate_ids[0]
@@ -606,6 +651,7 @@ def _render_storyboard_match(match):
                     st.video(str(preview_path))
 
     st.session_state["local_storyboard_selected_ids"] = selected_ids
+    st.session_state["local_storyboard_manual_fills"] = manual_fills
     st.session_state["local_library_bgm_candidates"] = match.bgm_candidates
 
 
@@ -999,6 +1045,7 @@ def _initialize_session_state():
         "local_storyboard_signature": "",
         "local_storyboard_match": None,
         "local_storyboard_selected_ids": {},
+        "local_storyboard_manual_fills": {},
         "local_library_bgm_id": "",
         "local_library_add_uploads": True,
         "local_library_upload_category": "上传导入",
@@ -8879,6 +8926,27 @@ def _render_generation_controls(
                 if match is None:
                     raise asset_library.AssetLibraryError(
                         "storyboard match snapshot is unavailable"
+                    )
+                # 缺口镜的人工选择不在匹配快照里，先写回快照再冻结计划，
+                # 这样候选校验和源时间裁切都沿用同一条既有路径。
+                manual_fills = dict(
+                    st.session_state.get("local_storyboard_manual_fills", {}) or {}
+                )
+                if manual_fills:
+                    library_by_id = {
+                        asset.asset_id: asset for asset in _ready_library_videos()
+                    }
+                    missing = sorted(set(manual_fills.values()) - set(library_by_id))
+                    if missing:
+                        raise asset_library.AssetLibraryError(
+                            f"manually selected material is not indexed: {missing}"
+                        )
+                    match = asset_matching.with_manual_candidates(
+                        match,
+                        {
+                            shot_index: library_by_id[asset_id]
+                            for shot_index, asset_id in manual_fills.items()
+                        },
                     )
                 params.local_storyboard_plan = list(
                     asset_matching.build_storyboard_plan(match, selected_mapping)

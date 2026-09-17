@@ -6,7 +6,7 @@ import math
 import re
 from array import array
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
@@ -615,6 +615,80 @@ def _candidate_segment(shot: StoryboardShot, candidate_index: int) -> LibrarySeg
     )
 
 
+_MANUAL_SELECTION_MODEL = "manual-selection"
+_MANUAL_SELECTION_REASON = "manually selected from the local library to fill a gap shot"
+
+
+def _shot_sort_key(index: str) -> tuple[int, int | str]:
+    """分镜序号通常是数字，按数值排序；非数字序号退回字面排序且排在后面。"""
+    text = str(index)
+    return (0, int(text)) if text.isdigit() else (1, text)
+
+
+def with_manual_candidates(
+    match: StoryboardMatch,
+    assets_by_shot: Mapping[str, LibraryAsset],
+) -> StoryboardMatch:
+    """
+    把人工为缺口镜选择的素材写回候选快照。
+
+    匹配器宁可留缺口也不硬凑无关素材，缺口镜因此没有候选，冻结计划时会被
+    判为「选择未覆盖全部分镜」。人工选择的素材写回快照后，既有校验（候选
+    必须存在于快照中）无需放宽即可通过，快照也仍然如实记录用户看到的东西。
+
+    @param match 当前候选快照。
+    @param assets_by_shot 按分镜序号映射的人工选择素材，只允许填补缺口镜。
+    @returns 缺口镜带上人工候选的新快照；无人工选择时返回原快照。
+    @raises AssetLibraryError 序号不存在，或该镜本来就有匹配候选。
+    """
+    if not isinstance(assets_by_shot, Mapping):
+        raise AssetLibraryError("manual storyboard selections must be an object")
+    if not assets_by_shot:
+        return match
+    shots_by_index = {str(shot.index): shot for shot in match.shots}
+    unknown = sorted(set(assets_by_shot) - set(shots_by_index))
+    if unknown:
+        raise AssetLibraryError(
+            f"manual selection refers to unknown shot(s): {', '.join(unknown)}"
+        )
+    occupied = sorted(
+        index for index in assets_by_shot if shots_by_index[index].candidates
+    )
+    if occupied:
+        raise AssetLibraryError(
+            f"shot {', '.join(occupied)} already has matched candidates; "
+            "manual selection only fills gap shots"
+        )
+    shots: list[StoryboardShot] = []
+    for shot in match.shots:
+        asset = assets_by_shot.get(str(shot.index))
+        if asset is None:
+            shots.append(shot)
+            continue
+        # 人工素材没有逐窗口分析，整条可用；相关性分数留空，不伪造匹配得分。
+        segment = LibrarySegment(
+            segment_id=f"manual-{asset.asset_id}",
+            asset_id=asset.asset_id,
+            source_start_seconds=0.0,
+            source_end_seconds=asset.duration,
+            description=asset.description,
+            tags=asset.tags,
+            analysis_status=asset.analysis_status,
+            analysis_error=asset.analysis_error,
+            analysis_model=_MANUAL_SELECTION_MODEL,
+        )
+        shots.append(
+            replace(
+                shot,
+                candidates=(asset,),
+                candidate_segments=(segment,),
+                candidate_scores=(),
+                candidate_reasons=(_MANUAL_SELECTION_REASON,),
+            )
+        )
+    return StoryboardMatch(tuple(shots), match.bgm_candidates)
+
+
 def build_storyboard_plan(
     match: StoryboardMatch,
     selected_ids: Mapping[str, str],
@@ -631,8 +705,20 @@ def build_storyboard_plan(
         raise AssetLibraryError("storyboard selections must be an object")
     plan: list[dict[str, Any]] = []
     expected_indexes = {str(shot.index) for shot in match.shots}
-    if set(selected_ids) != expected_indexes:
-        raise AssetLibraryError("storyboard selections do not cover all shots")
+    provided = {str(key) for key in selected_ids}
+    if provided != expected_indexes:
+        # 报错必须指出是哪一镜：缺口镜要么人工补素材，要么改文案，
+        # 只说「未覆盖全部分镜」用户无从下手。
+        missing = sorted(expected_indexes - provided, key=_shot_sort_key)
+        unexpected = sorted(provided - expected_indexes, key=_shot_sort_key)
+        details: list[str] = []
+        if missing:
+            details.append(f"shot {', '.join(missing)} has no selected material")
+        if unexpected:
+            details.append(f"unknown shot {', '.join(unexpected)}")
+        raise AssetLibraryError(
+            f"storyboard selections do not cover all shots: {'; '.join(details)}"
+        )
     for shot in match.shots:
         selected_id = str(selected_ids.get(str(shot.index), "")).strip()
         candidate_index = next(

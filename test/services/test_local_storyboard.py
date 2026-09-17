@@ -464,6 +464,148 @@ class TestLocalStoryboard(unittest.TestCase):
         ):
             asset_matching.build_storyboard_plan(result, {"1": "asset-1"})
 
+    def test_uncovered_shot_error_names_the_shots_that_need_a_material(self):
+        # 缺口镜的报错必须指出是哪一镜缺素材，否则用户在 WebUI 只看到
+        # 「selections do not cover all shots」，无从判断该改文案还是补素材。
+        asset = _asset(
+            "asset-1",
+            relative_path="relax.mp4",
+            description="沙发休息",
+            tags=("放松",),
+        )
+        match = asset_matching.StoryboardMatch(
+            shots=(
+                asset_matching.StoryboardShot(
+                    index=1,
+                    text="放松一下。",
+                    start_seconds=0.0,
+                    duration_seconds=2.0,
+                    candidates=(asset,),
+                ),
+                asset_matching.StoryboardShot(
+                    index=2,
+                    text="会议开始。",
+                    start_seconds=2.0,
+                    duration_seconds=2.0,
+                    candidates=(),
+                ),
+                asset_matching.StoryboardShot(
+                    index=3,
+                    text="服务器巡检。",
+                    start_seconds=4.0,
+                    duration_seconds=2.0,
+                    candidates=(),
+                ),
+            ),
+            bgm_candidates=(),
+        )
+
+        with self.assertRaises(asset_library.AssetLibraryError) as caught:
+            asset_matching.build_storyboard_plan(match, {"1": "asset-1"})
+
+        message = str(caught.exception)
+        self.assertIn("do not cover", message)
+        self.assertIn("2", message)
+        self.assertIn("3", message)
+
+    def test_manual_candidate_fills_a_gap_shot_so_the_plan_can_be_built(self):
+        # 方案要求缺口镜「留缺口让人工替换」。人工选择的素材写回候选快照后，
+        # 冻结计划的既有校验（候选必须在快照里）无需放宽即可通过。
+        matched = _asset(
+            "asset-1",
+            relative_path="relax.mp4",
+            description="沙发休息",
+            tags=("放松",),
+        )
+        manual = _asset(
+            "asset-2",
+            relative_path="server.mp4",
+            description="机房服务器",
+            tags=("机房",),
+            duration=9.0,
+        )
+        match = asset_matching.StoryboardMatch(
+            shots=(
+                asset_matching.StoryboardShot(
+                    index=1,
+                    text="放松一下。",
+                    start_seconds=0.0,
+                    duration_seconds=2.0,
+                    candidates=(matched,),
+                    candidate_segments=(_segment(matched),),
+                ),
+                asset_matching.StoryboardShot(
+                    index=2,
+                    text="服务器巡检。",
+                    start_seconds=2.0,
+                    duration_seconds=2.0,
+                    candidates=(),
+                ),
+            ),
+            bgm_candidates=(),
+        )
+
+        filled = asset_matching.with_manual_candidates(match, {"2": manual})
+        plan = asset_matching.build_storyboard_plan(
+            filled, {"1": "asset-1", "2": "asset-2"}
+        )
+
+        self.assertEqual([item["asset_id"] for item in plan], ["asset-1", "asset-2"])
+        manual_entry = plan[1]
+        self.assertEqual(manual_entry["source_start_seconds"], 0.0)
+        # 人工素材没有片段分析，整条可用，裁切范围就是整个素材时长。
+        self.assertEqual(manual_entry["source_end_seconds"], 9.0)
+        self.assertIn("manual", manual_entry["selection_reason"].lower())
+        # 人工选择没有相关性分数，不能伪造一个数字冒充匹配结果。
+        self.assertIsNone(manual_entry["relevance_score"])
+
+    def test_manual_candidate_refuses_to_overwrite_a_matched_shot(self):
+        # 人工替换只用于填补缺口；覆盖已有候选会让快照与用户看到的不一致。
+        asset = _asset(
+            "asset-1",
+            relative_path="relax.mp4",
+            description="沙发休息",
+            tags=("放松",),
+        )
+        match = asset_matching.StoryboardMatch(
+            shots=(
+                asset_matching.StoryboardShot(
+                    index=1,
+                    text="放松一下。",
+                    start_seconds=0.0,
+                    duration_seconds=2.0,
+                    candidates=(asset,),
+                ),
+            ),
+            bgm_candidates=(),
+        )
+
+        with self.assertRaisesRegex(asset_library.AssetLibraryError, "already has"):
+            asset_matching.with_manual_candidates(match, {"1": asset})
+
+    def test_manual_candidate_rejects_an_unknown_shot_index(self):
+        asset = _asset(
+            "asset-1",
+            relative_path="relax.mp4",
+            description="沙发休息",
+            tags=("放松",),
+        )
+        match = asset_matching.StoryboardMatch(
+            shots=(
+                asset_matching.StoryboardShot(
+                    index=1,
+                    text="放松一下。",
+                    start_seconds=0.0,
+                    duration_seconds=2.0,
+                    candidates=(),
+                ),
+            ),
+            bgm_candidates=(),
+        )
+
+        with self.assertRaisesRegex(asset_library.AssetLibraryError, "shot"):
+            asset_matching.with_manual_candidates(match, {"7": asset})
+
     def test_match_storyboard_uses_query_context_for_plain_narration(self):
         asset = _asset(
             "asset-1",

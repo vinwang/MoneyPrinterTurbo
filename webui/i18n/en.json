@@ -661,6 +661,10 @@
     "MuAPI Billing Notice Without Script": "Each generated clip is billed by MuAPI. Enter or generate the video script to see an estimated task count.",
     "Confirm MuAPI Charge": "I understand MuAPI video generation creates paid tasks",
     "Confirm MuAPI Charge Help": "MuAPI clips are submitted one at a time and stop once they cover the voiceover duration. An ambiguous submission is not retried because it may already have created a billable remote task.",
-    "Confirm MuAPI Charge Required": "Please confirm the MuAPI charge before generating the video."
+    "Confirm MuAPI Charge Required": "Please confirm the MuAPI charge before generating the video.",
+    "Storyboard Gap Needs Material": "This shot has no relevant material",
+    "Fill Storyboard Gap": "Pick a material for shot",
+    "Storyboard Gap Unfilled": "Not selected — edit the script or add materials",
+    "Storyboard Gaps Need Material": "Some shots still have no material selected"
   }
 }
