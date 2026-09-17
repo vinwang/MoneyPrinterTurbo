@@ -29,15 +29,21 @@ SUPPORTED_SOURCES = {
     "pexels",
     "pixabay",
     "coverr",
+    "wavespeed",
     "volcengine_seedance",
     "ofox",
     "metaso_minimax",
+    "muapi",
+    # Keep this list aligned with ``_CLI_VIDEO_SOURCES`` in cli.py. A source that
+    # the CLI accepts must not be rejected here as unsupported.
+    "openai_image",
     "local",
 }
 VOLCENGINE_ARK_API_KEY_URL = (
     "https://console.volcengine.com/ark/region:ark+cn-beijing/apikey"
 )
 OFOX_API_KEY_URL = "https://ofox.ai"
+MUAPI_API_KEY_URL = "https://muapi.ai"
 PEXELS_API_KEY_URL = "https://www.pexels.com/api/"
 PEXELS_VALIDATION_URL = "https://api.pexels.com/v1/collections?per_page=1"
 PEXELS_API_KEY_HELP_URL = (
@@ -65,7 +71,13 @@ RECOMMENDED_LLM_PROVIDERS = {
         "https://platform.xiaomimimo.com/docs/zh-CN/quick-start/first-api-call",
     ),
 }
-KEYLESS_LLM_PROVIDERS = {"ollama", "litellm"}
+# Providers that generate without an API key stored in config.toml: Ollama talks
+# to a local server, LiteLLM resolves credentials through its own environment,
+# and ``claude_code`` consumes the Claude subscription through the locally
+# logged-in ``claude`` CLI. Keep this set aligned with the
+# ``requires_api_key=False`` entries of ``app/models/llm_provider.py``; asking
+# the user for a key that the provider never reads leaves the Skill stuck.
+KEYLESS_LLM_PROVIDERS = {"ollama", "litellm", "claude_code"}
 CUSTOM_OPENAI_PROVIDER = "oneapi"
 
 # Hidden providers such as Qwen, Azure, and Grok remain usable when already
@@ -223,6 +235,7 @@ def apply_environment_config(config_path: Path) -> None:
     metaso_minimax_key = os.environ.get(
         "MPT_METASO_MINIMAX_API_KEY", ""
     ).strip()
+    muapi_key = os.environ.get("MPT_MUAPI_API_KEY", "").strip()
     if not any(
         (
             provider,
@@ -233,6 +246,7 @@ def apply_environment_config(config_path: Path) -> None:
             seedance_key,
             ofox_key,
             metaso_minimax_key,
+            muapi_key,
         )
     ):
         return
@@ -269,6 +283,9 @@ def apply_environment_config(config_path: Path) -> None:
             text, "metaso_minimax_api_key", metaso_minimax_key
         )
         changes.append("metaso_minimax_api_key")
+    if muapi_key:
+        text = _replace_config_value(text, "muapi_api_key", muapi_key)
+        changes.append("muapi_api_key")
     config_path.write_text(text, encoding="utf-8")
     log("updated configuration fields: " + ", ".join(changes))
 
@@ -360,6 +377,15 @@ def missing_config(config_path: Path, cli_args: list[str]) -> tuple[str, list[st
             missing.append("volcengine_seedance_api_key")
         if not has_cli_option(cli_args, "--confirm-seedance-charge"):
             missing.append("confirm_seedance_charge")
+    elif source == "wavespeed":
+        # WaveSpeed 的运行时凭据只来自 wavespeed_api_keys，没有环境变量回退，
+        # 这里保持同一口径。按次计费的生成源还必须显式确认收费。
+        if not _has_configured_value(
+            _plain_config_value(text, "wavespeed_api_keys")
+        ):
+            missing.append("wavespeed_api_keys")
+        if not has_cli_option(cli_args, "--confirm-wavespeed-charge"):
+            missing.append("confirm_wavespeed_charge")
     elif source == "ofox":
         # 与运行时 Provider 保持完全一致的凭据优先级：配置键优先，其次是
         # 语义明确的 OFOX_API_KEY 环境变量。
@@ -382,6 +408,22 @@ def missing_config(config_path: Path, cli_args: list[str]) -> tuple[str, list[st
             missing.append("metaso_minimax_api_key")
         if not has_cli_option(cli_args, "--confirm-metaso-minimax-charge"):
             missing.append("confirm_metaso_minimax_charge")
+    elif source == "muapi":
+        value = (
+            _plain_config_value(text, "muapi_api_key")
+            or os.environ.get("MUAPI_API_KEY", "").strip()
+        )
+        if not _has_configured_value(value):
+            missing.append("muapi_api_key")
+        if not has_cli_option(cli_args, "--confirm-muapi-charge"):
+            missing.append("confirm_muapi_charge")
+    elif source == "openai_image":
+        # 与运行时的 is_openai_image_enabled() 保持一致：文生图素材源只要求端点
+        # 与模型名。完全本地的 ComfyUI/SD 网关允许不配置 API Key，因此这里不
+        # 能把 openai_image_api_keys 当作必填项。
+        for field in ("openai_image_base_url", "openai_image_model"):
+            if not _has_configured_value(_plain_config_value(text, field)):
+                missing.append(field)
     elif source != "local":
         value = _plain_config_value(text, f"{source}_api_keys")
         if not _has_configured_value(value):
@@ -401,6 +443,7 @@ def report_missing_config(provider: str, missing: list[str]) -> int:
             "volcengine_seedance_api_key",
             "ofox_api_key",
             "metaso_minimax_api_key",
+            "muapi_api_key",
         }
         for field in missing
     ):
@@ -417,6 +460,12 @@ def report_missing_config(provider: str, missing: list[str]) -> int:
             "OPENAI_COMPATIBLE_REQUIRED="
             "API key, API base URL, model name"
         )
+    if any(field.startswith("openai_image_") for field in missing):
+        print(
+            "OPENAI_IMAGE_REQUIRED="
+            "openai_image_base_url, openai_image_model (the API key is optional "
+            "for local gateways)"
+        )
     if "pexels_api_keys" in missing:
         print(f"PEXELS_API_KEY_URL={PEXELS_API_KEY_URL}")
         print(f"PEXELS_API_KEY_HELP_URL={PEXELS_API_KEY_HELP_URL}")
@@ -425,6 +474,8 @@ def report_missing_config(provider: str, missing: list[str]) -> int:
         print("VOLCENGINE_ARK_API_KEY_ENV=MPT_VOLCENGINE_ARK_API_KEY")
     if "confirm_seedance_charge" in missing:
         print("SEEDANCE_CHARGE_CONFIRMATION_REQUIRED=--confirm-seedance-charge")
+    if "confirm_wavespeed_charge" in missing:
+        print("WAVESPEED_CHARGE_CONFIRMATION_REQUIRED=--confirm-wavespeed-charge")
     if "ofox_api_key" in missing:
         print(f"OFOX_API_KEY_URL={OFOX_API_KEY_URL}")
         print("OFOX_API_KEY_ENV=MPT_OFOX_API_KEY")
@@ -437,6 +488,11 @@ def report_missing_config(provider: str, missing: list[str]) -> int:
             "METASO_MINIMAX_CHARGE_CONFIRMATION_REQUIRED="
             "--confirm-metaso-minimax-charge"
         )
+    if "muapi_api_key" in missing:
+        print(f"MUAPI_API_KEY_URL={MUAPI_API_KEY_URL}")
+        print("MUAPI_API_KEY_ENV=MPT_MUAPI_API_KEY")
+    if "confirm_muapi_charge" in missing:
+        print("MUAPI_CHARGE_CONFIRMATION_REQUIRED=--confirm-muapi-charge")
     print("Request only the listed values, set the environment variables, and rerun the same command.")
     return NEEDS_INPUT_EXIT_CODE
 
@@ -563,6 +619,7 @@ def run_checked(command: list[str], *, cwd: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
         errors="replace",
         check=False,
     )

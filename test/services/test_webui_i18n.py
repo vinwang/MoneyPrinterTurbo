@@ -13,7 +13,7 @@ WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
 I18N_DIR = ROOT_DIR / "webui" / "i18n"
 LLM_PROVIDER_TIPS_PREFIX = "llm_provider_tips."
 TTS_PROVIDER_TIPS_PREFIX = "tts_provider_tips."
-SECONDARY_LOCALES = ("de", "es", "fr", "id", "it", "ko", "pt", "ru", "tr", "vi")
+SECONDARY_LOCALES = ("az", "de", "es", "fr", "id", "it", "ko", "pt", "ru", "tr", "vi")
 PROVIDER_TIPS_PREFIXES = (
     LLM_PROVIDER_TIPS_PREFIX,
     TTS_PROVIDER_TIPS_PREFIX,
@@ -114,8 +114,15 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "Watermark Y Ratio",
         "AI Video Quote Required",
         "AI Video Quote Retained For Retry",
+        "AI Video Quote Estimate Incomplete",
         "AI Video Quote Summary",
         "AI Video Quote Summary Singular",
+        "AI Video Model",
+        "AI Video Model Reference Price",
+        "AI Video Model List Load Failed",
+        "AI Video Duration Basis Actual",
+        "AI Video Duration Basis Estimated",
+        "AI Video Material Coverage",
         "AI Video Scene Count",
         "Confirm AI Video Charge",
         "Confirm AI Video Charge Help",
@@ -130,10 +137,14 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "Local LLM Script Generation",
         "llm_provider_label.apimart",
         "llm_provider_label.openrouter",
+        "llm_provider_label.api_route",
+        "llm_provider_label.fluxionai",
         "llm_provider_label.shengsuanyun",
         "LoomLoom Poll Retry Pending",
         "LoomLoom Poll Retry Warning",
         "Resume LoomLoom Status Check",
+        "Refresh AI Video Models",
+        "Retry AI Video Quote",
         "LoomLoom Quote Summary Singular",
         "LoomLoom Video Terms Reuse Help",
         "Metaso MiniMax H3",
@@ -152,16 +163,35 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "Confirm Metaso MiniMax Charge",
         "Confirm Metaso MiniMax Charge Help",
         "Confirm Metaso MiniMax Charge Required",
+        "MuAPI AI Video",
+        "MuAPI AI Video Help",
+        "MuAPI API Key",
+        "MuAPI API Key Help",
+        "MuAPI Base URL",
+        "MuAPI Base URL Help",
+        "MuAPI Video Endpoint",
+        "MuAPI Video Endpoint Help",
+        "MuAPI Resolution",
+        "MuAPI Resolution Help",
+        "Please Enter the MuAPI API Key",
+        "MuAPI Billing Notice",
+        "MuAPI Billing Notice Without Script",
+        "Confirm MuAPI Charge",
+        "Confirm MuAPI Charge Help",
+        "Confirm MuAPI Charge Required",
         "Script Generation Method",
         "Script Generation Method Help",
         "Shengsuan Cloud AI Video",
         "Shengsuan Cloud AI Video Help",
         "Shengsuan Cloud API Key",
         "Shengsuan Cloud API Key Help",
+        "Shengsuan Cloud API Key Link",
         "Shengsuan Cloud API Key Placeholder",
         "Shengsuan Cloud API Key Required",
         "Shengsuan Cloud API Key Reused",
         "Shengsuan Cloud Batch Script Generation",
+        "Selected AI Video Model Unavailable",
+        "Selected AI Video Ratio Unavailable",
         "Stop Tracking LoomLoom Run",
         "Stop Tracking LoomLoom Run Help",
         "Local Storyboard Preview",
@@ -193,6 +223,9 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "Local BGM Preparation Failed",
         "Local Material Import Failed",
         "Local Asset Usage Record Failed",
+        "Unavailable AI Video Model",
+        "VoxCPM Speed Not Supported",
+        "None (Animation)",
     }
 )
 FORMAT_PLACEHOLDER_PATTERN = re.compile(r"(?<!\{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!\})")
@@ -218,6 +251,22 @@ class _TrKeyVisitor(ast.NodeVisitor):
 def _load_translation(locale):
     data = json.loads((I18N_DIR / f"{locale}.json").read_text(encoding="utf-8"))
     return data.get("Translation", {})
+
+
+def _duplicate_translation_keys(path):
+    """返回 locale 原始文本中重复定义的键，JSON 解析只保留最后一个。"""
+    duplicates = []
+
+    def collect(pairs):
+        seen = set()
+        for key, _ in pairs:
+            if key in seen:
+                duplicates.append(key)
+            seen.add(key)
+        return dict(pairs)
+
+    json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=collect)
+    return duplicates
 
 
 def _required_translation_keys(translations):
@@ -384,3 +433,14 @@ class TestWebuiI18n(unittest.TestCase):
 
         self.assertIsNotNone(support_locales)
         self.assertIn("ru-RU", support_locales)
+
+    def test_locale_files_do_not_redefine_a_translation_key(self):
+        """
+        同一 JSON 对象里出现重复键时，解析只保留最后一个，前一个被静默丢弃。
+        视频转场与字幕动画曾共用 "None" 键，中文转场下拉因此显示成「无动画」。
+        这里直接检查原始 locale 文本，避免同类覆盖再次逃过 tr() 键覆盖测试。
+        """
+
+        for path in sorted(I18N_DIR.glob("*.json")):
+            with self.subTest(locale=path.stem):
+                self.assertEqual(_duplicate_translation_keys(path), [])

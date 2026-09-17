@@ -105,6 +105,14 @@
   </tr>
   <tr>
     <td align="center" width="120">
+      <a href="https://fluxionai.space/register?source=github&amp;campaign=moneyprinterturbo&amp;promo=MONEYPRINTERTURBO"><img src="docs/sponsors/fluxionai-logo.png" alt="Fluxion AI" width="120"></a>
+    </td>
+    <td align="left">
+      本プロジェクトを支援してくださっている <a href="https://fluxionai.space/register?source=github&amp;campaign=moneyprinterturbo&amp;promo=MONEYPRINTERTURBO">Fluxion AI</a> に感謝します！ <strong>世界の主要 AI モデルへのアクセスと管理を、ひとつの窓口で。</strong>個人開発者、技術チーム、企業向けに、統一 API を通じて主要モデルを利用できるプラットフォームです。複数の接続経路を動的に切り替えることで可用性を高め、モデルの性能、応答時間、利用料金を透明に確認できます。モデルや接続経路によって、<strong>API 利用コストを公式料金や基準価格より 40%～98% 削減できます</strong>。<a href="https://fluxionai.space/register?source=github&amp;campaign=moneyprinterturbo&amp;promo=MONEYPRINTERTURBO">専用リンクから登録</a>すると、<strong>3 米ドル分の API クレジット</strong>を受け取れます。
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="120">
       <a href="https://reccloud.com"><img src="docs/sponsors/reccloud-logo.svg" alt="RecCloud" height="36"></a><br>
       <a href="https://reccloud.com"><strong>RecCloud</strong></a>
     </td>
@@ -128,9 +136,9 @@
 <p align="center">
   <a href="https://mangodisk.app/ja">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://assets.mangodisk.app/images/screenshots/ja/dark-01-deep-cleanup.jpg">
-      <source media="(prefers-color-scheme: light)" srcset="https://assets.mangodisk.app/images/screenshots/ja/light-01-deep-cleanup.jpg">
-      <img src="https://assets.mangodisk.app/images/screenshots/ja/light-01-deep-cleanup.jpg" width="900" alt="MangoDisk ディープクリーン画面">
+      <source media="(prefers-color-scheme: dark)" srcset="https://assets.mangodisk.app/images/screenshots/ja/dark-01-deep-cleanup.jpg?ver=1.1.0">
+      <source media="(prefers-color-scheme: light)" srcset="https://assets.mangodisk.app/images/screenshots/ja/light-01-deep-cleanup.jpg?ver=1.1.0">
+      <img src="https://assets.mangodisk.app/images/screenshots/ja/light-01-deep-cleanup.jpg?ver=1.1.0" width="900" alt="MangoDisk ディープクリーン画面">
     </picture>
   </a>
 </p>
@@ -158,7 +166,7 @@
 
 - [x] AI による**多言語動画台本**の生成・リライトに加え、独自台本の利用にも対応
 - [x] [Kimi / Moonshot AI](https://platform.kimi.ai?track_id=track-f6b0a640d35c41deb03b247242a1058c&aff=moneyprinterturbo)、[OpenAI](https://platform.openai.com/api-keys)、[Anthropic Claude](https://platform.claude.com/settings/keys)、[Google Gemini](https://aistudio.google.com/app/apikey)、[DeepSeek](https://platform.deepseek.com/api_keys)、[Alibaba Cloud Qwen](https://qwen.ai/apiplatform)、[Microsoft Azure OpenAI](https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/OpenAI)、[ByteDance VolcEngine Ark](https://console.volcengine.com/ark)、[xAI Grok](https://console.x.ai/)、[MiniMax](https://platform.minimax.io/)、[Xiaomi MiMo](https://platform.xiaomimimo.com/docs/zh-CN/quick-start/first-api-call) などの主要なモデルサービスに対応
-- [x] [Shengsuan Cloud](https://www.shengsuanyun.com/?from=CH_XUQ4OTSK)、[APIMart](https://go.apimart.ai/gh-moneyprinterturbo)、[Cloudflare AI Gateway](https://dash.cloudflare.com/)、[Alibaba ModelScope](https://modelscope.cn/docs/model-service/API-Inference/intro)、[AIHubMix](https://aihubmix.com/)、[AIML API](https://aimlapi.com/app/keys)、[EvoLink](https://evolink.ai/dashboard/keys)、[OpenRouter](https://openrouter.ai/settings/keys)、[Ollama](https://ollama.com/)、[OneAPI](https://github.com/songquanpeng/one-api)、[LiteLLM](https://docs.litellm.ai/docs/providers)、[Groq](https://console.groq.com/keys)、[Pollinations AI](https://enter.pollinations.ai/) などの統合ゲートウェイ、集約サービス、ローカルランタイムに対応
+- [x] [Shengsuan Cloud](https://www.shengsuanyun.com/?from=CH_XUQ4OTSK)、[APIMart](https://go.apimart.ai/gh-moneyprinterturbo)、[Cloudflare AI Gateway](https://dash.cloudflare.com/)、[Alibaba ModelScope](https://modelscope.cn/docs/model-service/API-Inference/intro)、[AIHubMix](https://aihubmix.com/)、[AIML API](https://aimlapi.com/app/keys)、[EvoLink](https://evolink.ai/dashboard/keys)、[OpenRouter](https://openrouter.ai/settings/keys)、[API Route](https://www.api-route.com/)、[Fluxion AI](https://fluxionai.space/register?source=github&campaign=moneyprinterturbo&promo=MONEYPRINTERTURBO)、[Ollama](https://ollama.com/)、[Claude Code サブスクリプション](https://code.claude.com/docs)、[OneAPI](https://github.com/songquanpeng/one-api)、[LiteLLM](https://docs.litellm.ai/docs/providers)、[Groq](https://console.groq.com/keys)、[Pollinations AI](https://enter.pollinations.ai/) などの統合ゲートウェイ、集約サービス、ローカルランタイムに対応
 
 ### 動画・画像素材
 
@@ -168,13 +176,14 @@
 - [x] [Volcano Engine Ark Seedance](https://console.volcengine.com/ark/region:ark+cn-beijing/apikey) をネイティブに統合し、台本の各セグメントから一貫した動画素材を生成可能
 - [x] [WaveSpeed AI](https://wavespeed.ai) によるテキスト動画生成で、台本のキーワードからオリジナル素材を作成可能
 - [x] [OFox](https://ofox.ai) のマルチモデルテキスト動画生成に対応し、1 つの API キーで Seedance、Wan などのモデルを利用可能
+- [x] 非同期の [MuAPI](https://muapi.ai) テキスト動画 API で 3～12 秒の AI 素材を生成し、Endpoint、アスペクト比、解像度、ポーリングを設定可能
 - [x] [OpenAI 互換の画像生成](https://platform.openai.com/docs/guides/image-generation)サービスや独自の画像ゲートウェイを接続し、生成画像を動きのある動画クリップに変換可能
 - [x] クリップの長さ、フレームへの合わせ方、素材の使用順を調整し、アスペクト比や構成に合わせた編集が可能
 
 ### ナレーション・字幕・BGM
 
 - [x] 自動ナレーション、音声ファイルのアップロード、音声なしの 3 つの方式に対応し、音声サンプルとナレーション全体をプレビュー可能
-- [x] **Edge TTS（無料・API キー不要）**、Azure Speech、SiliconFlow、Google Gemini、Xiaomi MiMo、MiniMax、ElevenLabs、Chatterbox、Fish Audio などの音声サービスに対応
+- [x] **Edge TTS（無料・API キー不要）**、Azure Speech、SiliconFlow、Google Gemini、Xiaomi MiMo、MiniMax、ElevenLabs、Chatterbox、Kokoro、Fish Audio、ModelBest VoxCPM などの音声サービスに対応
 - [x] 字幕を自動生成し、フォント、位置、色、サイズ、縁取り、背景スタイルを調整可能
 - [x] ランダム、ローカル、AI 生成の BGM に対応し、音量を個別に調整可能
 
@@ -265,6 +274,10 @@ Create a video with the topic "How AI is changing everyday life."
 GitHub Releases から最新の Windows 用ワンクリックパッケージをダウンロードし、そのまま展開してください。
 
 - [最新の Windows 用ワンクリックパッケージをダウンロード](https://github.com/harry0703/MoneyPrinterTurbo/releases/latest)
+
+> 同ページの **Assets** から `.7z` ファイルをダウンロードしてください。GitHub が
+> 自動生成する `Source code (zip)` / `Source code (tar.gz)` はソースコードのみで、
+> 展開しても `webui.bat` だけが現れ、`start.bat` と `update.bat` は含まれません。
 
 ダウンロード後は、まず `update.bat` を**ダブルクリック**して**最新のコード**に更新し、その後 `start.bat` をダブルクリックして起動することを推奨します
 
@@ -418,7 +431,7 @@ uv run python cli.py --batch-file ./tasks.json --stop-at video
 
 ### 音声合成
 
-WebUI の **Azure TTS V1** は **Edge TTS** を利用しており、無料かつ API キー不要です。MoneyPrinterTurbo は **Azure TTS V2**、**SiliconFlow TTS**、**Google Gemini TTS**、**Xiaomi MiMo TTS**、**ElevenLabs TTS**、セルフホストの **Chatterbox TTS**、**Fish Audio TTS**、および音声なしモードにも対応しています。
+WebUI の **Azure TTS V1** は **Edge TTS** を利用しており、無料かつ API キー不要です。MoneyPrinterTurbo は **Azure TTS V2**、**SiliconFlow TTS**、**Google Gemini TTS**、**Xiaomi MiMo TTS**、**ElevenLabs TTS**、セルフホストの **Chatterbox TTS**、セルフホストの **Kokoro TTS**、**Fish Audio TTS**、および音声なしモードにも対応しています。
 
 WebUI でプロバイダーと音声を選択し、必要な認証情報については画面の案内に従ってください。Edge TTS に API キーは不要です。[Azure TTS V2](https://portal.azure.com/) やその他のクラウドプロバイダーでは、それぞれのプラットフォームで発行した認証情報が必要です。利用可能な Edge TTS の音声は[音声リスト](./docs/voice-list.txt)で確認できます。
 

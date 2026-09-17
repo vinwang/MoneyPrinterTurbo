@@ -7,6 +7,8 @@ import gc
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unicodedata
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack, redirect_stdout
@@ -84,6 +86,9 @@ _MIN_MATERIAL_DIMENSION = 480
 # 既能放行仅仅因为取整而略低于阈值的素材，也仍然能挡住真正的低清素材。
 _MIN_DIMENSION_TOLERANCE = 10
 _DEFAULT_VIDEO_CODEC = "libx264"
+# ffmpeg 串联片段期间没有阶段日志，`subprocess.run` 又阻塞到进程退出，耗时拼接在
+# 日志上表现为“无输出”。这里按间隔记录存活信息，便于区分编码中与已经卡死。
+_FFMPEG_CONCAT_HEARTBEAT_SECONDS = 30.0
 _SUBTITLE_SPRING_DURATION_SECONDS = 0.18
 _MIN_SUBTITLE_SPRING_SCALE = 0.05
 _MAX_SUBTITLE_SPRING_SCALE = 1.35
@@ -200,6 +205,8 @@ def is_material_resolution_acceptable(width: int, height: int) -> bool:
 def _prioritize_unique_source_clips(
     subclipped_items: List[SubClippedVideoClip],
     concat_mode: VideoConcatMode,
+    source_usage: dict[str, int] | None = None,
+    source_groups: dict[str, str] | None = None,
 ) -> List[SubClippedVideoClip]:
     """
     优先让每个源素材只出现一次，降低成片里同一素材反复出现的概率。
@@ -216,7 +223,26 @@ def _prioritize_unique_source_clips(
 
     concat_mode_value = getattr(concat_mode, "value", concat_mode)
     if concat_mode_value != VideoConcatMode.random.value:
-        return subclipped_items
+        if source_usage is None:
+            return subclipped_items
+        if not source_groups:
+            return sorted(
+                subclipped_items,
+                key=lambda item: source_usage.get(item.source_file_path, 0),
+            )
+        # Keep keyword rounds in order while rotating candidates within each keyword.
+        groups = {}
+        for item in subclipped_items:
+            key = source_groups.get(item.source_file_path, item.source_file_path)
+            groups.setdefault(key, []).append(item)
+        for items in groups.values():
+            items.sort(key=lambda item: source_usage.get(item.source_file_path, 0))
+        return [
+            item
+            for row in itertools.zip_longest(*groups.values())
+            for item in row
+            if item is not None
+        ]
 
     grouped_items: dict[str, list[SubClippedVideoClip]] = {}
     for item in subclipped_items:
@@ -231,6 +257,10 @@ def _prioritize_unique_source_clips(
 
     random.shuffle(primary_items)
     random.shuffle(overflow_items)
+    if source_usage is not None:
+        # Stable sorting retains randomness among equally used sources.
+        primary_items.sort(key=lambda item: source_usage.get(item.source_file_path, 0))
+        overflow_items.sort(key=lambda item: source_usage.get(item.source_file_path, 0))
     logger.info(
         "prioritized unique video materials, "
         f"sources: {len(grouped_items)}, "
@@ -284,6 +314,8 @@ def _ffmpeg_encoder_exists(ffmpeg_binary: str, codec: str) -> bool:
             [ffmpeg_binary, "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             timeout=10,
         )
@@ -413,6 +445,42 @@ def _format_ffmpeg_concat_path(file_path: str) -> str:
     return _escape_ffmpeg_concat_path(absolute_path.replace("\\", "/"))
 
 
+def _describe_concat_output_progress(output_file: str) -> str:
+    """返回输出文件当前大小的可读描述，用于拼接心跳日志。"""
+    try:
+        size = os.path.getsize(output_file)
+    except OSError:
+        # 输出文件尚未创建时同样要安全降级，不能影响拼接本身。
+        return "output size not available"
+    return f"output size: {size / (1024 * 1024):.2f} MB"
+
+
+def _run_concat_with_heartbeat(command: list[str], output_file: str):
+    """
+    阻塞等待 ffmpeg 完成，期间按间隔记录存活日志。
+
+    ffmpeg 串联片段时没有阶段日志，`subprocess.run` 又把输出缓冲到进程退出，耗时拼接
+    在日志上表现为“无输出”。记录已等待时长与输出文件大小，便于区分仍在编码与已经卡死。
+    """
+    started_at = time.monotonic()
+    stop_event = threading.Event()
+
+    def log_heartbeat() -> None:
+        while not stop_event.wait(_FFMPEG_CONCAT_HEARTBEAT_SECONDS):
+            logger.info(
+                "ffmpeg concat still running: "
+                f"elapsed={time.monotonic() - started_at:.0f}s, "
+                f"{_describe_concat_output_progress(output_file)}"
+            )
+
+    reporter = threading.Thread(target=log_heartbeat, daemon=True)
+    reporter.start()
+    try:
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+    finally:
+        stop_event.set()
+
+
 def concat_video_clips_with_ffmpeg(
     clip_files: List[str],
     output_file: str,
@@ -450,13 +518,8 @@ def concat_video_clips_with_ffmpeg(
     def run_concat(codec: str):
         command = build_command(codec)
         # 使用 ffmpeg 只做一次串联与编码，避免 MoviePy 逐段合并时反复重编码，
-        # 从而降低画质劣化与颜色偏移风险。
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        # 从而降低画质劣化与颜色偏移风险。阻塞等待期间由心跳日志体现任务仍在运行。
+        result = _run_concat_with_heartbeat(command, output_file)
         if result.returncode != 0:
             error_message = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(error_message or "ffmpeg concat failed")
@@ -844,6 +907,9 @@ def combine_videos(
     video_fit_mode: VideoFitMode = VideoFitMode.cover,
     *,
     storyboard_timeline: Sequence[Mapping[str, object]] | None = None,
+    source_usage: dict[str, int] | None = None,
+    source_groups: dict[str, str] | None = None,
+    used_video_paths: List[str] | None = None,
 ) -> str:
     """
     拼接普通素材列表，或按冻结的本地分镜时间轴裁切并拼接素材。
@@ -859,6 +925,9 @@ def combine_videos(
     @param clip_speed 素材播放速度。
     @param video_fit_mode 画幅不一致时的适配模式。
     @param storyboard_timeline 本地分镜的源/目标时间范围；None 使用旧逻辑。
+    @param source_usage 每个源素材在此前批量输出中的使用次数。
+    @param source_groups 源素材到搜索关键词的分组映射。
+    @param used_video_paths 输出中实际使用的源素材路径收集器。
     @returns 已写入的中间视频路径。
     @raises ValueError 时间轴不连续、超出源视频或无法覆盖音频时长。
     """
@@ -946,6 +1015,11 @@ def combine_videos(
     subclipped_items = _prioritize_unique_source_clips(
         subclipped_items=subclipped_items,
         concat_mode=video_concat_mode,
+        **(
+            {"source_usage": source_usage, "source_groups": source_groups}
+            if source_usage is not None
+            else {}
+        ),
     )
         
     logger.debug(f"total subclipped items: {len(subclipped_items)}")
@@ -1082,6 +1156,14 @@ def combine_videos(
         output_dir=output_dir,
         max_duration=audio_duration,
     )
+    if used_video_paths is not None:
+        # Exclude safety-margin clips that FFmpeg trims entirely from the output.
+        elapsed = 0.0
+        for clip in processed_clips:
+            if elapsed >= audio_duration:
+                break
+            used_video_paths.append(clip.source_file_path)
+            elapsed += clip.duration
     
     # clean temp files
     delete_files(clip_files)
