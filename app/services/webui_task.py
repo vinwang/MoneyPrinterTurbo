@@ -62,6 +62,9 @@ def _run_generation(
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
     post_process_spec_path: str | None = None,
     post_process_output_root: str | None = None,
+    voxcpm_reference_audio: bytes | None = None,
+    voxcpm_prompt_audio: bytes | None = None,
+    voxcpm_prompt_text: str = "",
 ) -> dict:
     """
     在后台线程中执行现有视频流水线。
@@ -120,6 +123,9 @@ def _run_generation(
                 voice_preview=voice_preview,
                 loomloom_video_request=loomloom_video_request,
                 post_process_callback=callback,
+                voxcpm_reference_audio=voxcpm_reference_audio,
+                voxcpm_prompt_audio=voxcpm_prompt_audio,
+                voxcpm_prompt_text=voxcpm_prompt_text,
             )
     except Exception as exc:
         # tm.start 已负责把流水线异常转换成失败状态；这里额外保护日志 sink、
@@ -163,6 +169,9 @@ def submit_generation(
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
     post_process_spec_path: str | None = None,
     post_process_output_root: str | None = None,
+    voxcpm_reference_audio: bytes | None = None,
+    voxcpm_prompt_audio: bytes | None = None,
+    voxcpm_prompt_text: str = "",
 ) -> None:
     """
     登记并提交 WebUI 视频生成任务，调用后立即返回。
@@ -183,6 +192,18 @@ def submit_generation(
     # 预览载荷只包含不可变音频路径、参数快照和只读字幕时间轴。复制外层字典，
     # 避免页面后续 rerun 替换缓存字段时影响已经提交到后台队列的任务。
     voice_preview_snapshot = dict(voice_preview) if voice_preview else None
+    # Reference audio belongs only to this queued request. It is deliberately
+    # separate from VideoParams so it cannot reach task history, presets, state
+    # persistence, or logs. ``bytes`` is immutable; make an explicit snapshot
+    # before the background worker starts so later WebUI reruns cannot share
+    # mutable upload state with this task.
+    voxcpm_reference_audio_snapshot = (
+        bytes(voxcpm_reference_audio) if voxcpm_reference_audio else None
+    )
+    voxcpm_prompt_audio_snapshot = (
+        bytes(voxcpm_prompt_audio) if voxcpm_prompt_audio else None
+    )
+    voxcpm_prompt_text_snapshot = str(voxcpm_prompt_text or "")
     # 已确认请求是冻结的数据对象，只在当前进程内传递。API Key 不会进入
     # VideoParams、任务状态、日志或落盘历史，也不会受后续页面 rerun 影响。
     loomloom_request_snapshot = loomloom_video_request
@@ -204,6 +225,9 @@ def submit_generation(
             loomloom_video_request=loomloom_request_snapshot,
             post_process_spec_path=post_process_spec_snapshot,
             post_process_output_root=post_process_output_snapshot,
+            voxcpm_reference_audio=voxcpm_reference_audio_snapshot,
+            voxcpm_prompt_audio=voxcpm_prompt_audio_snapshot,
+            voxcpm_prompt_text=voxcpm_prompt_text_snapshot,
         )
     except Exception as exc:
         # 调度失败与流水线失败一样必须成为可查询状态，避免任务管理器永久显示

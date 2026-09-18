@@ -19,6 +19,60 @@ class TestSubtitleService(unittest.TestCase):
             missing_file = Path(tmp_dir) / "missing.srt"
             self.assertEqual(subtitle.file_to_subtitles(str(missing_file)), [])
 
+    def test_transcribe_audio_bytes_returns_editable_text_and_cleans_temps(self):
+        temporary_paths = []
+
+        def fake_create(audio_file, subtitle_file, word_level=False, log_details=True):
+            self.assertFalse(word_level)
+            self.assertFalse(log_details)
+            temporary_paths.extend([Path(audio_file), Path(subtitle_file)])
+            self.assertEqual(Path(audio_file).read_bytes(), b"wav-audio")
+            Path(subtitle_file).write_text(
+                "1\n00:00:00,000 --> 00:00:01,000\n第一句\n\n"
+                "2\n00:00:01,000 --> 00:00:02,000\nOpen A I\n\n",
+                encoding="utf-8",
+            )
+
+        with patch.object(subtitle, "create", side_effect=fake_create):
+            transcript = subtitle.transcribe_audio_bytes(b"wav-audio")
+
+        self.assertEqual(transcript, "第一句 Open A I")
+        self.assertTrue(all(not path.exists() for path in temporary_paths))
+
+    def test_transcribe_audio_bytes_returns_empty_when_whisper_fails(self):
+        with patch.object(subtitle, "create", return_value=""):
+            self.assertEqual(subtitle.transcribe_audio_bytes(b"wav-audio"), "")
+
+    def test_create_can_hide_sensitive_paths_and_recognized_text(self):
+        class _FakeWhisperModel:
+            def __init__(self, **_kwargs):
+                pass
+
+            def transcribe(self, _audio_file, **_kwargs):
+                word = SimpleNamespace(start=0.0, end=0.5, word="private transcript.")
+                segment = SimpleNamespace(start=0.0, end=0.5, words=[word])
+                info = SimpleNamespace(language="en", language_probability=0.99)
+                return [segment], info
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "private-reference.srt"
+            with (
+                patch.object(subtitle, "model", None),
+                patch.object(subtitle, "WhisperModel", _FakeWhisperModel),
+                patch.object(subtitle.logger, "info") as info,
+                patch.object(subtitle.logger, "debug") as debug,
+            ):
+                subtitle.create(
+                    str(Path(tmp_dir) / "private-reference.wav"),
+                    str(subtitle_file),
+                    log_details=False,
+                )
+
+        logged = " ".join(str(call) for call in info.call_args_list)
+        self.assertNotIn("private-reference", logged)
+        self.assertNotIn("private transcript", logged)
+        debug.assert_not_called()
+
     def test_levenshtein_distance_and_similarity_cover_common_boundaries(self):
         """
         字幕校正依赖编辑距离选择是否继续合并相邻字幕，因此覆盖空字符串、
@@ -237,6 +291,36 @@ class TestSubtitleService(unittest.TestCase):
             items = subtitle.file_to_subtitles(str(subtitle_file))
 
         self.assertEqual([item[2] for item in items], ["Hello", "World"])
+
+    def test_file_to_subtitles_preserves_timestamps_in_cue_text(self):
+        """Timestamp examples in narration must not replace a cue's timing."""
+        for text in (
+            "Jump to 00:01:23,456 in the recording.",
+            "00:01:23,456",
+            "00:01:23,456 --> 00:01:24,000",
+        ):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp_dir:
+                subtitle_file = Path(tmp_dir) / "subtitle.srt"
+                subtitle_file.write_text(
+                    "1\n00:00:00,000 --> 00:00:02,000\n"
+                    f"Timestamp example:\n{text}\nContinue watching.\n\n"
+                    "2\n00:00:02,000 --> 00:00:03,000\nNext cue",
+                    encoding="utf-8",
+                )
+
+                items = subtitle.file_to_subtitles(str(subtitle_file))
+
+                self.assertEqual(
+                    items,
+                    [
+                        (
+                            1,
+                            "00:00:00,000 --> 00:00:02,000",
+                            f"Timestamp example:\n{text}\nContinue watching.",
+                        ),
+                        (2, "00:00:02,000 --> 00:00:03,000", "Next cue"),
+                    ],
+                )
 
 
 if __name__ == "__main__":
